@@ -36,6 +36,19 @@ QString accessibleName(AtspiAccessible *accessible) {
     return result;
 }
 
+void activateAccessibleTree(AtspiAccessible *top) {
+    // Chromium/Electron may expose a frame with a null child until an AT
+    // client requests extended properties. Reading names/roles alone does
+    // not activate their accessibility tree.
+    atspi_accessible_clear_cache(top);
+    GError *error = nullptr;
+    GHashTable *attributes = atspi_accessible_get_attributes(top, &error);
+    if (attributes) g_hash_table_unref(attributes);
+    if (error) g_error_free(error);
+    // Discard the placeholder child cached before activation.
+    atspi_accessible_clear_cache(top);
+}
+
 bool visible(AtspiAccessible *accessible) {
     AtspiStateSet *states = atspi_accessible_get_state_set(accessible);
     if (!states) return false;
@@ -130,7 +143,9 @@ TargetScanner::Result TargetScanner::scan(const QJsonObject &snapshot) const {
         result.error = QStringLiteral("No KWin window or screen geometry is available");
         return result;
     }
-    if (atspi_init() != 0) {
+    // atspi_init() returns 1 when this process has already initialized it.
+    const int initStatus = atspi_init();
+    if (initStatus != 0 && initStatus != 1) {
         result.error = QStringLiteral("AT-SPI accessibility bus is unavailable");
         return result;
     }
@@ -199,7 +214,10 @@ TargetScanner::Result TargetScanner::scan(const QJsonObject &snapshot) const {
                     const qreal toleranceX = qMax<qreal>(24, context.client.width() * 0.08);
                     const qreal toleranceY = qMax<qreal>(24, context.client.height() * 0.08);
                     if (context.topExtents.isValid() && context.client.isValid() &&
-                        dx <= toleranceX && dy <= toleranceY) walk(top, context, 0);
+                        dx <= toleranceX && dy <= toleranceY) {
+                        activateAccessibleTree(top);
+                        walk(top, context, 0);
+                    }
                 } else if (!pidMatches.isEmpty()) ++result.unmatchedWindows;
                 g_object_unref(top);
             }

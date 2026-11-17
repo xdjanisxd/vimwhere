@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonParseError>
 #include <QStandardPaths>
 #include <QTemporaryFile>
@@ -28,7 +29,8 @@ bool KWinBridge::start() {
         return false;
     }
     if (!bus.registerService(QStringLiteral("org.kde.Vimwhere"))) {
-        m_error = QStringLiteral("Cannot own org.kde.Vimwhere: %1").arg(bus.lastError().message());
+        m_error = QStringLiteral("Cannot own org.kde.Vimwhere; another Vimwhere instance may be running");
+        if (!bus.lastError().message().isEmpty()) m_error += QStringLiteral(": ") + bus.lastError().message();
         return false;
     }
     if (!bus.registerObject(QStringLiteral("/Vimwhere"), this,
@@ -96,9 +98,18 @@ void KWinBridge::Snapshot(const QString &json) {
         return;
     }
     m_snapshot = object;
+    const auto cursor = object.value(QStringLiteral("cursor")).toArray();
+    if (cursor.size() == 2)
+        m_cursorPosition = QPointF(cursor[0].toDouble(), cursor[1].toDouble());
     if (!m_ready) {
         m_ready = true;
         emit readyChanged(true);
     }
     emit snapshotChanged();
+}
+
+void KWinBridge::CursorPosition(const QString &json) {
+    const auto value = QJsonDocument::fromJson(json.toUtf8()).array();
+    if (value.size() == 2 && value[0].isDouble() && value[1].isDouble())
+        m_cursorPosition = QPointF(value[0].toDouble(), value[1].toDouble());
 }

@@ -15,7 +15,6 @@ OverlayView::OverlayView(QScreen *screen) : QQuickView() {
     setColor(Qt::transparent);
     setResizeMode(QQuickView::SizeRootObjectToView);
     auto *shell = LayerShellQt::Window::get(this);
-    shell->setScreen(screen);
     shell->setScope(QStringLiteral("vimwhere"));
     shell->setLayer(LayerShellQt::Window::LayerOverlay);
     shell->setAnchors(LayerShellQt::Window::Anchors(LayerShellQt::Window::AnchorTop) | LayerShellQt::Window::AnchorBottom |
@@ -26,6 +25,9 @@ OverlayView::OverlayView(QScreen *screen) : QQuickView() {
         QStringLiteral("vimwhere/qml/Overlay.qml"));
     if (path.isEmpty()) path = QStringLiteral(VIMWHERE_SOURCE_DIR "/qml/Overlay.qml");
     setSource(QUrl::fromLocalFile(path));
+    // QQuickView can reset its screen while loading the QML source.
+    setScreen(screen);
+    shell->setScreenConfiguration(LayerShellQt::Window::ScreenFromQWindow);
 }
 
 void OverlayView::setPresentation(const QString &mode, const QString &prompt,

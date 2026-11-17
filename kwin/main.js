@@ -1,10 +1,12 @@
 // Loaded by the application through org.kde.kwin.Scripting. All coordinates
 // below are KWin logical compositor coordinates, never physical buffer pixels.
 function rect(r) { return [r.x, r.y, r.width, r.height]; }
+function point(p) { return [p.x, p.y]; }
 function isOnVisibleDesktop(w) {
     if (w.minimized || w.hidden || w.deleted) return false;
     if (w.desktops.length) {
-        const current = w.output ? workspace.currentDesktopForScreen(w.output) : workspace.currentDesktop;
+        const current = w.output && typeof workspace.currentDesktopForScreen === "function"
+            ? workspace.currentDesktopForScreen(w.output) : workspace.currentDesktop;
         let found = false;
         for (const desktop of w.desktops) if (desktop === current) found = true;
         if (!found) return false;
@@ -34,9 +36,14 @@ function sendSnapshot() {
         screens.push({name: String(output.name), geometry: rect(output.geometry), scale: Number(output.devicePixelRatio)});
     callDBus("__VIMWHERE_BUS_NAME__", "/Vimwhere", "org.kde.Vimwhere", "Snapshot",
              JSON.stringify({windows: windows, screens: screens,
-                 activeScreen: workspace.activeScreen ? String(workspace.activeScreen.name) : ""}));
+                 activeScreen: workspace.activeScreen ? String(workspace.activeScreen.name) : "",
+                 cursor: point(workspace.cursorPos)}));
 }
 sendSnapshot();
+connectIfAvailable(workspace.cursorPosChanged, function() {
+    callDBus("__VIMWHERE_BUS_NAME__", "/Vimwhere", "org.kde.Vimwhere", "CursorPosition",
+             JSON.stringify(point(workspace.cursorPos)));
+});
 function connectIfAvailable(signal, handler) {
     if (signal && typeof signal.connect === "function") signal.connect(handler);
 }

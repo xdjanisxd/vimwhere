@@ -46,6 +46,10 @@ public:
     int selectDevicesCalls = 0;
     int selectSourcesCalls = 0;
     int startCalls = 0;
+    int motionCalls = 0;
+    int buttonCalls = 0;
+    QPointF pointer{20, 20};
+    bool unpositioned = false;
 
     QDBusObjectPath responsePath(const QString &sender, const QVariantMap &options,
                                  const QVariantMap &results) {
@@ -90,13 +94,22 @@ public slots:
     QDBusObjectPath Start(const QDBusObjectPath &, const QString &, const QVariantMap &options) {
         ++portal_->startCalls;
         const QRect geometry = QGuiApplication::primaryScreen()->geometry();
-        StreamTuple stream{42,
-            {{QStringLiteral("source_type"), uint(1)},
-             {QStringLiteral("position"), QVariant::fromValue(IntPair{geometry.x(), geometry.y()})},
-             {QStringLiteral("size"), QVariant::fromValue(IntPair{geometry.width(), geometry.height()})}}};
+        QVariantMap properties{{QStringLiteral("source_type"), uint(1)},
+                               {QStringLiteral("size"), QVariant::fromValue(IntPair{geometry.width(), geometry.height()})}};
+        if (!portal_->unpositioned)
+            properties.insert(QStringLiteral("position"),
+                              QVariant::fromValue(IntPair{geometry.x(), geometry.y()}));
+        StreamTuple stream{42, properties};
         return portal_->responsePath(portal_->message().service(), options,
             {{QStringLiteral("devices"), uint(2)},
              {QStringLiteral("streams"), QVariant::fromValue(StreamList{stream})}});
+    }
+    void NotifyPointerMotion(const QDBusObjectPath &, const QVariantMap &, double dx, double dy) {
+        ++portal_->motionCalls;
+        portal_->pointer += QPointF(dx, dy);
+    }
+    void NotifyPointerButton(const QDBusObjectPath &, const QVariantMap &, int, uint) {
+        ++portal_->buttonCalls;
     }
 private:
     FakePortal *portal_;
@@ -140,6 +153,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     FakePortal portal;
+    portal.unpositioned = app.arguments().contains(QStringLiteral("--unpositioned"));
     RemoteDesktop remote(&portal);
     ScreenCast screen(&portal);
     if (!bus.registerObject(QStringLiteral("/org/freedesktop/portal/desktop"), &portal,
@@ -151,7 +165,17 @@ int main(int argc, char **argv) {
     bool ready = false;
     QString error;
     QObject::connect(&clicker, &PortalClicker::readyChanged, &app, [&](bool value) {
-        if (value) { ready = true; app.quit(); }
+        if (value) {
+            ready = true;
+            if (portal.unpositioned)
+                clicker.clickGlobal(QPointF(120, 80), [&] { return std::optional<QPointF>(portal.pointer); });
+            else app.quit();
+        }
+    });
+    QObject::connect(&clicker, &PortalClicker::clickFinished, &app,
+                     [&](bool success, const QString &message) {
+        if (!success) error = message;
+        app.quit();
     });
     QObject::connect(&clicker, &PortalClicker::sessionFailed, &app, [&](const QString &value) {
         error = value; app.quit();
@@ -159,8 +183,10 @@ int main(int argc, char **argv) {
     QTimer::singleShot(5000, &app, [&] { error = QStringLiteral("timed out"); app.quit(); });
     clicker.prepare();
     app.exec();
-    if (!ready || !clicker.isReady() || portal.selectDevicesCalls != 1 ||
-        portal.selectSourcesCalls != 1 || portal.startCalls != 1) {
+    if (!error.isEmpty() || !ready || !clicker.isReady() || portal.selectDevicesCalls != 1 ||
+        portal.selectSourcesCalls != 1 || portal.startCalls != 1 ||
+        (portal.unpositioned && (portal.motionCalls != 1 || portal.buttonCalls != 2 ||
+                                 portal.pointer != QPointF(120, 80)))) {
         qCritical() << "Portal string session regression failed:" << error
                     << portal.selectDevicesCalls << portal.selectSourcesCalls << portal.startCalls;
         return 1;
