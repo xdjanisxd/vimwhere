@@ -33,7 +33,10 @@ bool AppController::start() {
         qCritical() << "Vimwhere requires a native Wayland Qt session";
         return false;
     }
-    if (!m_kwin.start()) qWarning().noquote() << m_kwin.errorString();
+    if (!m_kwin.start()) {
+        qCritical().noquote() << m_kwin.errorString();
+        return false;
+    }
     QSettings settings;
     const QKeySequence hintKey(settings.value(QStringLiteral("shortcuts/hints"),
         QStringLiteral("Ctrl+Alt+F")).toString());
@@ -272,7 +275,7 @@ void AppController::selectHint(int index) {
             showError(QStringLiteral("Target window moved, closed, or became covered; select it again"));
             return;
         }
-        m_portal.clickGlobal(target.globalPoint);
+        m_portal.clickGlobal(target.globalPoint, [this] { return m_kwin.cursorPosition(); });
     });
 }
 
@@ -293,6 +296,6 @@ void AppController::selectGrid() {
             showError(QStringLiteral("Display layout changed; select the grid point again"));
             return;
         }
-        m_portal.clickGlobal(point);
+        m_portal.clickGlobal(point, [this] { return m_kwin.cursorPosition(); });
     });
 }

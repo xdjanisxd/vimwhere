@@ -5,6 +5,8 @@
 #include <QString>
 #include <QVariantMap>
 #include <QVector>
+#include <optional>
+#include <functional>
 
 class PortalClicker : public QObject {
     Q_OBJECT
@@ -13,7 +15,8 @@ public:
     ~PortalClicker() override;
 
     void prepare();
-    void clickGlobal(const QPointF &globalLogicalPoint);
+    void clickGlobal(const QPointF &globalLogicalPoint,
+                     std::function<std::optional<QPointF>()> currentPointer = {});
     bool isReady() const;
     QString errorString() const;
 
@@ -32,6 +35,7 @@ private:
         QPointF position;
         QPointF size;
         QPointF logicalSize;
+        bool positioned = false;
     };
     enum class Step { Idle, Creating, SelectingDevices, SelectingSources, Starting, Ready };
 
@@ -39,7 +43,11 @@ private:
     void request(const QString &interface, const QString &method,
                  const QVariantList &arguments, Step step);
     void fail(const QString &message);
-    void dispatchClick(const QPointF &point);
+    void dispatchClick(const QPointF &point,
+                       const std::function<std::optional<QPointF>()> &currentPointer);
+    void verifyRelativeMotion(const QPointF &point,
+                              const std::function<std::optional<QPointF>()> &currentPointer,
+                              const QString &session, int attemptsLeft);
     void sendButton(uint state);
     void setReady(bool ready);
     void closeSession();

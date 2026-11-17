@@ -8,8 +8,10 @@
 #include <QDBusPendingReply>
 #include <QDBusVariant>
 #include <QGuiApplication>
+#include <QDebug>
 #include <QRegularExpression>
 #include <QScreen>
+#include <QTimer>
 #include <QUuid>
 
 #include <cmath>
@@ -85,15 +87,16 @@ bool streamsFromVariant(const QVariant &raw, QVector<Stream> &streams) {
             continue; // Absolute global positions only make sense for monitors.
         Stream stream;
         stream.node = node;
-        if (!pairFromVariant(properties.value(QStringLiteral("position")), stream.position) ||
-            !pairFromVariant(properties.value(QStringLiteral("size")), stream.size) ||
-            stream.size.x() <= 0 || stream.size.y() <= 0)
-            continue;
-        stream.logicalSize = stream.size;
-        QPointF logicalSize;
-        if (pairFromVariant(properties.value(QStringLiteral("logical_size")), logicalSize) &&
-            logicalSize.x() > 0 && logicalSize.y() > 0)
-            stream.logicalSize = logicalSize;
+        stream.positioned = pairFromVariant(properties.value(QStringLiteral("position")), stream.position) &&
+            pairFromVariant(properties.value(QStringLiteral("size")), stream.size) &&
+            stream.size.x() > 0 && stream.size.y() > 0;
+        if (stream.positioned) {
+            stream.logicalSize = stream.size;
+            QPointF logicalSize;
+            if (pairFromVariant(properties.value(QStringLiteral("logical_size")), logicalSize) &&
+                logicalSize.x() > 0 && logicalSize.y() > 0)
+                stream.logicalSize = logicalSize;
+        }
         streams.append(stream);
     }
     argument.endArray();
@@ -108,7 +111,8 @@ PortalClicker::~PortalClicker() { closeSession(); }
 bool PortalClicker::isReady() const { return ready_; }
 QString PortalClicker::errorString() const { return error_; }
 
-void PortalClicker::clickGlobal(const QPointF &point) {
+void PortalClicker::clickGlobal(const QPointF &point,
+                                std::function<std::optional<QPointF>()> currentPointer) {
     if (!std::isfinite(point.x()) || !std::isfinite(point.y())) {
         emit clickFinished(false, QStringLiteral("Invalid click coordinates"));
         return;
@@ -122,7 +126,7 @@ void PortalClicker::clickGlobal(const QPointF &point) {
         emit clickFinished(false, QStringLiteral("A portal click is already in progress"));
         return;
     }
-    dispatchClick(point);
+    dispatchClick(point, currentPointer);
 }
 
 void PortalClicker::prepare() {
@@ -227,7 +231,7 @@ void PortalClicker::onRequestResponse(uint response, const QVariantMap &results)
         }
         QVector<Stream> streams;
         if (!streamsFromVariant(results.value(QStringLiteral("streams")), streams) || streams.isEmpty()) {
-            fail(QStringLiteral("Portal did not provide a positioned monitor stream"));
+            fail(QStringLiteral("Portal did not provide a monitor stream"));
             return;
         }
         streams_ = streams;
@@ -240,10 +244,11 @@ void PortalClicker::onRequestResponse(uint response, const QVariantMap &results)
     }
 }
 
-void PortalClicker::dispatchClick(const QPointF &point) {
+void PortalClicker::dispatchClick(const QPointF &point,
+                                  const std::function<std::optional<QPointF>()> &currentPointer) {
     const Stream *chosen = nullptr;
     for (const Stream &stream : streams_) {
-        if (point.x() >= stream.position.x() && point.y() >= stream.position.y() &&
+        if (stream.positioned && point.x() >= stream.position.x() && point.y() >= stream.position.y() &&
             point.x() < stream.position.x() + stream.size.x() &&
             point.y() < stream.position.y() + stream.size.y()) {
             chosen = &stream;
@@ -251,8 +256,35 @@ void PortalClicker::dispatchClick(const QPointF &point) {
         }
     }
     if (!chosen) {
-        error_ = QStringLiteral("Target is outside the monitors shared with the portal");
-        emit clickFinished(false, error_);
+        const auto origin = currentPointer ? currentPointer() : std::nullopt;
+        if (!origin || !std::isfinite(origin->x()) || !std::isfinite(origin->y())) {
+            error_ = QStringLiteral("KWin pointer position is unavailable for portal movement");
+            emit clickFinished(false, error_);
+            return;
+        }
+        clickInFlight_ = true;
+        auto message = QDBusMessage::createMethodCall(QString::fromLatin1(service),
+            QString::fromLatin1(desktopPath), QString::fromLatin1(remoteInterface),
+            QStringLiteral("NotifyPointerMotion"));
+        message.setArguments({QVariant::fromValue(QDBusObjectPath(sessionPath_)), QVariantMap{},
+                              point.x() - origin->x(), point.y() - origin->y()});
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
+        const QString session = sessionPath_;
+        connect(watcher, &QDBusPendingCallWatcher::finished, this,
+                [this, watcher, session, point, currentPointer] {
+            const QDBusPendingReply<> reply = *watcher;
+            watcher->deleteLater();
+            if (step_ != Step::Ready || sessionPath_ != session) return;
+            if (reply.isError()) {
+                clickInFlight_ = false;
+                error_ = QStringLiteral("Pointer motion failed: %1").arg(reply.error().message());
+                emit clickFinished(false, error_);
+                return;
+            }
+            // The portal does not promise one-to-one relative motion. Observe
+            // KWin's resulting cursor position before sending a click.
+            verifyRelativeMotion(point, currentPointer, session, 20);
+        });
         return;
     }
     bool geometryMatches = false;
@@ -293,6 +325,27 @@ void PortalClicker::dispatchClick(const QPointF &point) {
             return;
         }
         sendButton(1);
+    });
+}
+
+void PortalClicker::verifyRelativeMotion(
+    const QPointF &point, const std::function<std::optional<QPointF>()> &currentPointer,
+    const QString &session, int attemptsLeft) {
+    QTimer::singleShot(20, this, [this, point, currentPointer, session, attemptsLeft] {
+        if (step_ != Step::Ready || sessionPath_ != session) return;
+        const auto actual = currentPointer();
+        if (actual && std::isfinite(actual->x()) && std::isfinite(actual->y()) &&
+            std::hypot(actual->x() - point.x(), actual->y() - point.y()) <= 3.0) {
+            sendButton(1);
+        } else if (attemptsLeft > 1) {
+            verifyRelativeMotion(point, currentPointer, session, attemptsLeft - 1);
+        } else {
+            qWarning() << "Portal relative motion ended at"
+                       << (actual ? QVariant(*actual) : QVariant()) << "instead of" << point;
+            clickInFlight_ = false;
+            error_ = QStringLiteral("Portal pointer did not reach the selected target");
+            emit clickFinished(false, error_);
+        }
     });
 }
 
