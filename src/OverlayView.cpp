@@ -27,7 +27,8 @@ OverlayView::OverlayView(QScreen *screen) : QQuickView() {
     setSource(QUrl::fromLocalFile(path));
     // QQuickView can reset its screen while loading the QML source.
     setScreen(screen);
-    shell->setScreenConfiguration(LayerShellQt::Window::ScreenFromQWindow);
+    // Keep the layer-shell output binding explicit after QQuickView loaded QML.
+    shell->setScreen(screen);
 }
 
 void OverlayView::setPresentation(const QString &mode, const QString &prompt,

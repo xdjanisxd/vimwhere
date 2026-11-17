@@ -1,4 +1,5 @@
 #include "TargetScanner.h"
+#include "WindowMatcher.h"
 
 #include <QJsonArray>
 #include <QRectF>
@@ -170,7 +171,20 @@ TargetScanner::Result TargetScanner::scan(const QJsonObject &snapshot) const {
             if (error) { g_error_free(error); g_object_unref(app); continue; }
             int topCount = atspi_accessible_get_child_count(app, &error);
             if (error) { g_error_free(error); g_object_unref(app); continue; }
-            for (int t = 0; t < qMin(topCount, 100); ++t) {
+            const int boundedTopCount = qMin(topCount, 100);
+            QVector<QRectF> topFootprints;
+            auto ensureTopFootprints = [&] {
+                if (topFootprints.size() == boundedTopCount) return;
+                topFootprints.reserve(boundedTopCount);
+                for (int sibling = 0; sibling < boundedTopCount; ++sibling) {
+                    GError *footprintError = nullptr;
+                    AtspiAccessible *surface = atspi_accessible_get_child_at_index(app, sibling, &footprintError);
+                    if (footprintError) g_error_free(footprintError);
+                    topFootprints.push_back(surface ? atspiRectangle(surface) : QRectF());
+                    if (surface) g_object_unref(surface);
+                }
+            };
+            for (int t = 0; t < boundedTopCount; ++t) {
                 error = nullptr;
                 AtspiAccessible *top = atspi_accessible_get_child_at_index(app, t, &error);
                 if (error) g_error_free(error);
@@ -190,11 +204,29 @@ TargetScanner::Result TargetScanner::scan(const QJsonObject &snapshot) const {
                         title.startsWith(caption + QStringLiteral(" —")))) titleMatches.push_back(i);
                 }
                 int match = -1;
-                if (titleMatches.size() == 1) match = titleMatches.first();
+                if (titleMatches.size() == 1) {
+                    ensureTopFootprints();
+                    const int candidate = titleMatches.first();
+                    const QRectF client = rectangle(windows[candidate].toObject().value(QStringLiteral("client")));
+                    if (WindowMatcher::uniqueTopMatch(t, topFootprints[t], client, topFootprints))
+                        match = candidate;
+                }
                 else if (pidMatches.size() == 1 && topCount == 1) match = pidMatches.first();
+                else {
+                    ensureTopFootprints();
+                    QVector<WindowMatcher::Candidate> geometryCandidates;
+                    for (int i : pidMatches) {
+                        const auto w = windows[i].toObject();
+                        if (w.value(QStringLiteral("special")).toBool()) continue;
+                        geometryCandidates.push_back({i, rectangle(w.value(QStringLiteral("client")))});
+                    }
+                    match = WindowMatcher::uniqueGeometryMatch(t, topFootprints[t],
+                                                               geometryCandidates, topFootprints);
+                }
                 // Panels and popups can share a process with many surfaces.
                 // An ambiguous title must never become a clickable hint.
                 if (match >= 0) {
+                    ++result.matchedWindows;
                     const auto chosen = windows[match].toObject();
                     if ((chosen.value(QStringLiteral("special")).toBool() ||
                          chosen.value(QStringLiteral("popup")).toBool()) &&
@@ -225,7 +257,11 @@ TargetScanner::Result TargetScanner::scan(const QJsonObject &snapshot) const {
         }
         g_object_unref(desktop);
     }
-    if (result.targets.isEmpty())
-        result.error = QStringLiteral("No safely positioned accessible targets found (window matching or AT-SPI coordinates may differ)");
+    if (result.targets.isEmpty()) {
+        if (result.matchedWindows == 0 && result.unmatchedWindows == 0)
+            result.error = QStringLiteral("AT-SPI exposed no matching application windows. The session accessibility bus is enabled; close and reopen the target application, then try again.");
+        else
+            result.error = QStringLiteral("No safely positioned accessible targets found (window matching, occlusion, or AT-SPI coordinates may differ)");
+    }
     return result;
 }

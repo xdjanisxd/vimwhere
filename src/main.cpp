@@ -26,10 +26,10 @@ static int diagnose() {
         }
     }
     const int atspi = atspi_init();
-    out << "AT-SPI: " << (atspi == 0 ? "available" : "unavailable") << Qt::endl;
-    if (atspi == 0) out << "AT-SPI desktops: " << atspi_get_desktop_count() << Qt::endl;
+    out << "AT-SPI: " << (atspi == 0 || atspi == 1 ? "available" : "unavailable") << Qt::endl;
+    if (atspi == 0 || atspi == 1) out << "AT-SPI desktops: " << atspi_get_desktop_count() << Qt::endl;
     out << "Input: RemoteDesktop and ScreenCast portal consent is required on first use" << Qt::endl;
-    return wayland && bus.isConnected() && atspi == 0 ? 0 : 1;
+    return wayland && bus.isConnected() && (atspi == 0 || atspi == 1) ? 0 : 1;
 }
 
 int main(int argc, char *argv[]) {

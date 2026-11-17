@@ -2,6 +2,7 @@
 
 #include "KWinBridge.h"
 #include "TargetScanner.h"
+#include "HintScanRetry.h"
 #include "PortalClicker.h"
 
 #include <QObject>
@@ -34,6 +35,7 @@ private:
 
     KWinBridge m_kwin;
     TargetScanner m_scanner;
+    HintScanRetry m_hintScanRetry;
     PortalClicker m_portal;
     QVector<OverlayView *> m_overlays;
     QVector<HintTarget> m_hints;

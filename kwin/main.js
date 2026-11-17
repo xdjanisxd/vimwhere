@@ -36,6 +36,7 @@ function sendSnapshot() {
         screens.push({name: String(output.name), geometry: rect(output.geometry), scale: Number(output.devicePixelRatio)});
     callDBus("__VIMWHERE_BUS_NAME__", "/Vimwhere", "org.kde.Vimwhere", "Snapshot",
              JSON.stringify({windows: windows, screens: screens,
+                 activeWindow: workspace.activeWindow ? String(workspace.activeWindow.internalId) : "",
                  activeScreen: workspace.activeScreen ? String(workspace.activeScreen.name) : "",
                  cursor: point(workspace.cursorPos)}));
 }

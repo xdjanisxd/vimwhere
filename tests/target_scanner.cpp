@@ -1,19 +1,29 @@
 #include "../src/TargetScanner.h"
+#include "../src/HintScanRetry.h"
+#include "../src/WindowMatcher.h"
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QJsonArray>
 #include <QDebug>
+#include <QTimer>
 #include <atspi/atspi.h>
 #include <array>
 
 // In-process AT-SPI provider: model Chromium's dormant tree and libatspi's
 // cached attributes/null child without requiring a desktop or browser.
 namespace {
-std::array<GObject *, 4> objects;
+std::array<GObject *, 6> objects;
 bool active = false;
+bool multiWindow = false;
+bool sameSizeTop = false;
+bool sameTitleTop = false;
 bool cachedAttributes = true;
 bool cachedNullChild = true;
 bool attributeFailure = false;
+bool delayedProvider = false;
+bool zeroChildDelay = false;
 int activations = 0;
+int attributeRequests = 0;
 int indexOf(const void *object) {
     for (int i = 0; i < int(objects.size()); ++i)
         if (objects[i] == object) return i;
@@ -30,34 +40,69 @@ QJsonObject snapshot(bool covered = false, bool wrongSize = false) {
 void check(bool condition, const char *message) { if (!condition) qFatal("%s", message); }
 void reset(bool enabled = false) {
     active = enabled;
+    multiWindow = false;
+    sameSizeTop = false;
+    sameTitleTop = false;
     cachedAttributes = true;
     cachedNullChild = !enabled;
     attributeFailure = false;
+    delayedProvider = false;
+    zeroChildDelay = false;
     activations = 0;
+    attributeRequests = 0;
+}
+QJsonObject multiWindowSnapshot() {
+    return {{"windows", QJsonArray{
+        QJsonObject{{"id", "main"}, {"pid", 42}, {"title", "Different main title"},
+            {"client", QJsonArray{100, 100, 400, 300}}, {"frame", QJsonArray{100, 100, 400, 300}}},
+        QJsonObject{{"id", "popup"}, {"pid", 42}, {"title", "Different popup title"},
+            {"special", true}, {"popup", true}, {"client", QJsonArray{600, 100, 470, 55}},
+            {"frame", QJsonArray{600, 100, 470, 55}}}}},
+        {"screens", QJsonArray{QJsonObject{{"geometry", QJsonArray{0, 0, 1920, 1080}}}}}};
 }
 }
 extern "C" {
 int atspi_init() { return 1; } // Already initialized is a successful scan.
 gint atspi_get_desktop_count() { return 1; }
 AtspiAccessible *atspi_get_desktop(gint) { return ref<AtspiAccessible>(0); }
-gint atspi_accessible_get_child_count(AtspiAccessible *obj, GError **) { return indexOf(obj) < 3 ? 1 : 0; }
+gint atspi_accessible_get_child_count(AtspiAccessible *obj, GError **) {
+    const int i = indexOf(obj);
+    if (i == 0) return 1;
+    if (i == 1) return multiWindow ? 2 : 1;
+    if (i == 2 && zeroChildDelay && attributeRequests < 2) return 0;
+    if (i == 2 || i == 4) return 1;
+    return 0;
+}
 AtspiAccessible *atspi_accessible_get_child_at_index(AtspiAccessible *obj, gint child, GError **) {
     const int i = indexOf(obj);
-    if (child != 0 || i == 3 || (i == 2 && (!active || cachedNullChild))) return nullptr;
-    return ref<AtspiAccessible>(i + 1);
+    if (child < 0) return nullptr;
+    if (i == 0 && child == 0) return ref<AtspiAccessible>(1);
+    if (i == 1) {
+        if (child == 0) return ref<AtspiAccessible>(2);
+        if (child == 1 && multiWindow) return ref<AtspiAccessible>(4);
+        return nullptr;
+    }
+    if ((i == 2 || i == 4) && child == 0 && !(i == 2 && (!active || cachedNullChild)))
+        return ref<AtspiAccessible>(i + 1);
+    return nullptr;
 }
 guint atspi_accessible_get_process_id(AtspiAccessible *, GError **) { return 42; }
 gchar *atspi_accessible_get_name(AtspiAccessible *obj, GError **) {
-    return g_strdup(indexOf(obj) == 3 ? "Button" : "Fixture");
+    const int i = indexOf(obj);
+    return g_strdup(i == 3 || i == 5 ? "Button" :
+                    i == 4 ? (sameTitleTop ? "Fixture" : "Popup") : "Fixture");
 }
 AtspiRole atspi_accessible_get_role(AtspiAccessible *obj, GError **) {
-    return indexOf(obj) == 3 ? ATSPI_ROLE_PUSH_BUTTON : ATSPI_ROLE_FRAME;
+    const int i = indexOf(obj);
+    return i == 3 || i == 5 ? ATSPI_ROLE_PUSH_BUTTON : ATSPI_ROLE_FRAME;
 }
 AtspiComponent *atspi_accessible_get_component(AtspiAccessible *obj) { return ref<AtspiComponent>(indexOf(obj)); }
 AtspiRect *atspi_component_get_extents(AtspiComponent *obj, AtspiCoordType type, GError **) {
     check(type == ATSPI_COORD_TYPE_WINDOW, "Expected window-relative geometry");
     auto *rect = g_new(AtspiRect, 1);
-    *rect = indexOf(obj) == 3 ? AtspiRect{20, 30, 80, 40} : AtspiRect{0, 0, 400, 300};
+    const int i = indexOf(obj);
+    *rect = i == 3 || i == 5 ? AtspiRect{20, 30, 80, 40} :
+        i == 4 && !sameSizeTop ? AtspiRect{0, 0, 470, 55} : AtspiRect{0, 0, 400, 300};
     return rect;
 }
 AtspiStateSet *atspi_accessible_get_state_set(AtspiAccessible *obj) { return ref<AtspiStateSet>(indexOf(obj)); }
@@ -65,10 +110,11 @@ gboolean atspi_state_set_contains(AtspiStateSet *, AtspiStateType) { return true
 void atspi_accessible_clear_cache(AtspiAccessible *obj) {
     if (indexOf(obj) != 2) return;
     cachedAttributes = false;
-    if (active) cachedNullChild = false;
+    if (active && (!delayedProvider || attributeRequests >= 2)) cachedNullChild = false;
 }
 GHashTable *atspi_accessible_get_attributes(AtspiAccessible *obj, GError **error) {
     check(indexOf(obj) == 2, "Activate only the matched window");
+    ++attributeRequests;
     if (attributeFailure) {
         g_set_error_literal(error, g_quark_from_static_string("fixture"), 1, "Unsupported attributes");
         return nullptr;
@@ -93,13 +139,98 @@ int main(int argc, char **argv) {
           "Dormant tree must activate and discard its cached null child");
     check(result.targets[0].globalPoint == QPointF(160, 150), "Window-relative target must preserve placement");
     check(activations == 1, "Cached attributes must be refreshed to activate the provider");
+    reset();
+    QJsonObject noProvider = snapshot();
+    QJsonArray noProviderWindows = noProvider.value(QStringLiteral("windows")).toArray();
+    QJsonObject otherProcess = noProviderWindows.first().toObject();
+    otherProcess.insert(QStringLiteral("pid"), 77);
+    noProviderWindows[0] = otherProcess;
+    noProvider.insert(QStringLiteral("windows"), noProviderWindows);
+    const auto noProviderResult = scanner.scan(noProvider);
+    check(noProviderResult.targets.isEmpty() && noProviderResult.matchedWindows == 0 &&
+              noProviderResult.error.contains(QStringLiteral("no matching application windows")),
+          "A missing AT-SPI provider must be distinguished from unsafe geometry");
+    reset();
+    multiWindow = true;
+    const auto multiResult = scanner.scan(multiWindowSnapshot());
+    check(multiResult.error.isEmpty() && multiResult.targets.size() == 1 &&
+              multiResult.targets.first().windowId == QStringLiteral("main") &&
+              multiResult.matchedWindows == 1,
+          "A unique normal-window footprint resolves the main surface despite a same-PID popup");
+    const QRectF mainExtent(0, 0, 1920, 1080);
+    check(WindowMatcher::uniqueGeometryMatch(0, mainExtent,
+              {{1, QRectF(0, 0, 1920, 1080)}}, {mainExtent, QRectF(0, 0, 470, 55)}) == 1,
+          "The main-window footprint wins over a popup footprint");
+    check(WindowMatcher::uniqueGeometryMatch(0, mainExtent,
+              {{1, QRectF(0, 0, 1920, 1080)}, {2, QRectF(10, 10, 1920, 1080)}},
+              {mainExtent}) == -1,
+          "Two same-size windows remain ambiguous");
+    check(WindowMatcher::uniqueGeometryMatch(0, mainExtent,
+              {{1, QRectF(0, 0, 2880, 1620)}}, {mainExtent}) == -1,
+          "A physical/logical scale mismatch is rejected instead of guessed");
+    check(WindowMatcher::uniqueTopMatch(0, mainExtent, mainExtent,
+              {mainExtent, QRectF(0, 0, 470, 55)}),
+          "A small popup sibling does not make a matching main window ambiguous");
+    check(!WindowMatcher::uniqueTopMatch(0, mainExtent, mainExtent, {mainExtent, mainExtent}),
+          "Same-title roots with identical footprints cannot share one KWin window");
+    reset();
+    multiWindow = true;
+    sameSizeTop = true;
+    QJsonObject ambiguousWindows = snapshot();
+    QJsonArray ambiguousList = ambiguousWindows.value(QStringLiteral("windows")).toArray();
+    QJsonObject ambiguousCandidate = ambiguousList.first().toObject();
+    ambiguousCandidate.insert(QStringLiteral("title"), QStringLiteral("Different title"));
+    ambiguousList[0] = ambiguousCandidate;
+    ambiguousWindows.insert(QStringLiteral("windows"), ambiguousList);
+    const auto ambiguousResult = scanner.scan(ambiguousWindows);
+    check(ambiguousResult.targets.isEmpty() && ambiguousResult.matchedWindows == 0,
+          "Two same-PID AT-SPI roots cannot both map to one same-size KWin window");
+    reset();
+    multiWindow = true;
+    sameSizeTop = true;
+    sameTitleTop = true;
+    const auto sameTitleResult = scanner.scan(snapshot());
+    check(sameTitleResult.targets.isEmpty() && sameTitleResult.matchedWindows == 0,
+          "Two same-title, same-size AT-SPI roots remain ambiguous against one KWin window");
+    reset();
+    delayedProvider = true;
+    check(scanner.scan(snapshot()).targets.isEmpty(), "A late provider must be allowed to remain incomplete initially");
+    auto lateResult = scanner.scan(snapshot());
+    check(lateResult.targets.size() == 1,
+          "A subsequent AT-SPI pass must discover children that appeared after activation");
+    reset();
+    zeroChildDelay = true;
+    check(scanner.scan(snapshot()).targets.isEmpty(), "A dormant provider may initially report zero children");
+    auto zeroChildLateResult = scanner.scan(snapshot());
+    check(zeroChildLateResult.targets.size() == 1,
+          "A later AT-SPI pass must discover a tree that initially reported zero children");
+    reset();
+    zeroChildDelay = true;
+    HintScanRetry retry;
+    QEventLoop loop;
+    int retryScans = 0;
+    TargetScanner::Result retriedResult;
+    retry.start([&] {
+        ++retryScans;
+        return scanner.scan(snapshot());
+    }, [&](TargetScanner::Result result) {
+        retriedResult = std::move(result);
+        loop.quit();
+    }, [] { return true; });
+    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+    loop.exec();
+    check(retryScans == 6 && retriedResult.targets.size() == 1,
+          "The first invocation must retry the real scanner until the delayed zero-child tree hydrates");
     reset(); // Simulate provider disabling itself between invocations.
     check(scanner.scan(snapshot()).targets.size() == 1, "Repeated invocation must reactivate a dormant provider");
     reset(true);
     attributeFailure = true;
     check(scanner.scan(snapshot()).targets.size() == 1, "Unsupported attributes must not discard an active tree");
     reset();
-    check(scanner.scan(snapshot(false, true)).targets.isEmpty(), "Mismatched window geometry must remain rejected");
+    const auto unsafeGeometry = scanner.scan(snapshot(false, true));
+    check(unsafeGeometry.targets.isEmpty() && unsafeGeometry.unmatchedWindows > 0 &&
+              unsafeGeometry.error.contains(QStringLiteral("No safely positioned")),
+          "Mismatched window geometry must remain rejected as unsafe");
     check(activations == 0, "Do not activate rejected geometry");
     reset();
     check(scanner.scan(snapshot(true)).targets.isEmpty(), "Covered targets must remain rejected");

@@ -1,10 +1,23 @@
 #pragma once
 
 #include <QRectF>
+#include <QPointF>
+#include <QRect>
 #include <QVector>
 #include <QString>
 
 namespace NavigationMath {
+// QScreen::geometry() and the KWin/AT-SPI coordinates used by Vimwhere are
+// in logical desktop coordinates. Convert a global point into the local
+// coordinates of that screen's QML root, including negative monitor origins.
+inline QPointF screenLocalPoint(const QPointF &globalPoint, const QRect &screen) {
+    return globalPoint - QPointF(screen.topLeft());
+}
+
+inline bool containsGlobalPoint(const QRect &screen, const QPointF &globalPoint) {
+    return QRectF(screen).contains(globalPoint);
+}
+
 inline int hintCodeLength(int count) {
     int length = 1, capacity = 26;
     while (capacity < count) { ++length; capacity *= 26; }

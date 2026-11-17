@@ -1,6 +1,7 @@
 #include "AppController.h"
 #include "OverlayView.h"
 #include "NavigationMath.h"
+#include "AccessibilityStatus.h"
 
 #include <QAction>
 #include <QGuiApplication>
@@ -22,9 +23,11 @@ AppController::AppController(QObject *parent) : QObject(parent), m_kwin(this), m
         [this](const QString &error) { showError(QStringLiteral("Pointer permission failed: %1").arg(error)); });
     connect(qApp, &QGuiApplication::screenAdded, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
+        else if (m_hintScanRetry.isActive()) m_hintScanRetry.cancel();
     });
     connect(qApp, &QGuiApplication::screenRemoved, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
+        else if (m_hintScanRetry.isActive()) m_hintScanRetry.cancel();
     });
 }
 
@@ -37,6 +40,9 @@ bool AppController::start() {
         qCritical().noquote() << m_kwin.errorString();
         return false;
     }
+    QString accessibilityError;
+    if (!AccessibilityStatus::enableForSession(&accessibilityError))
+        qWarning().noquote() << "AT-SPI startup:" << accessibilityError;
     QSettings settings;
     const QKeySequence hintKey(settings.value(QStringLiteral("shortcuts/hints"),
         QStringLiteral("Ctrl+Alt+F")).toString());
@@ -79,18 +85,53 @@ void AppController::openHints() {
         qInfo() << "Complete the portal permission dialog, then press the hint shortcut again";
         return;
     }
+    QString accessibilityError;
+    if (!AccessibilityStatus::enableForSession(&accessibilityError)) {
+        showError(accessibilityError);
+        return;
+    }
     if (!m_kwin.isReady()) {
         showError(QStringLiteral("KWin geometry bridge is not ready: %1").arg(m_kwin.errorString()));
         return;
     }
-    auto result = m_scanner.scan(m_kwin.snapshot());
-    if (!result.error.isEmpty()) { showError(result.error); return; }
-    m_hints = std::move(result.targets);
-    const int length = NavigationMath::hintCodeLength(m_hints.size());
-    for (int i = 0; i < m_hints.size(); ++i) m_hints[i].label = NavigationMath::hintLabel(i, length);
-    m_prefix.clear();
-    m_mode = Mode::Hints;
-    render();
+    const QJsonObject initialSnapshot = m_kwin.snapshot();
+    const QString activeWindow = initialSnapshot.value(QStringLiteral("activeWindow")).toString();
+    const QString activeScreen = initialSnapshot.value(QStringLiteral("activeScreen")).toString();
+    QJsonValue activeClient, activeFrame;
+    for (const auto &value : initialSnapshot.value(QStringLiteral("windows")).toArray()) {
+        const auto window = value.toObject();
+        if (window.value(QStringLiteral("id")).toString() == activeWindow) {
+            activeClient = window.value(QStringLiteral("client"));
+            activeFrame = window.value(QStringLiteral("frame"));
+            break;
+        }
+    }
+    m_hintScanRetry.start(
+        [this] { return m_scanner.scan(m_kwin.snapshot()); },
+        [this](TargetScanner::Result result) {
+            if (!result.error.isEmpty()) { showError(result.error); return; }
+            m_hints = std::move(result.targets);
+            const int length = NavigationMath::hintCodeLength(m_hints.size());
+            for (int i = 0; i < m_hints.size(); ++i)
+                m_hints[i].label = NavigationMath::hintLabel(i, length);
+            m_prefix.clear();
+            m_mode = Mode::Hints;
+            render();
+        },
+        [this, activeWindow, activeScreen, initialSnapshot, activeClient, activeFrame] {
+            const QJsonObject current = m_kwin.snapshot();
+            if (current.value(QStringLiteral("activeWindow")).toString() != activeWindow ||
+                current.value(QStringLiteral("activeScreen")).toString() != activeScreen ||
+                current.value(QStringLiteral("screens")) != initialSnapshot.value(QStringLiteral("screens")))
+                return false;
+            for (const auto &value : current.value(QStringLiteral("windows")).toArray()) {
+                const auto window = value.toObject();
+                if (window.value(QStringLiteral("id")).toString() == activeWindow)
+                    return window.value(QStringLiteral("client")) == activeClient &&
+                        window.value(QStringLiteral("frame")) == activeFrame;
+            }
+            return activeWindow.isEmpty() && activeClient.isUndefined() && activeFrame.isUndefined();
+        });
 }
 
 void AppController::openGrid() {
@@ -111,6 +152,7 @@ void AppController::openGrid() {
 }
 
 void AppController::showError(const QString &error) {
+    m_hintScanRetry.cancel();
     qWarning().noquote() << "Vimwhere:" << error;
     m_error = error;
     m_mode = Mode::Error;
@@ -118,6 +160,7 @@ void AppController::showError(const QString &error) {
 }
 
 void AppController::closeMode() {
+    m_hintScanRetry.cancel();
     for (OverlayView *view : m_overlays) view->hide();
     m_mode = Mode::Idle;
     m_hints.clear();
@@ -179,10 +222,13 @@ void AppController::render() {
         QVariantList hints, grid;
         if (m_mode == Mode::Hints) {
             for (const auto &hint : m_hints) {
-                if (!hint.label.startsWith(m_prefix) || !screen.contains(hint.globalPoint)) continue;
+                if (!hint.label.startsWith(m_prefix) ||
+                    !NavigationMath::containsGlobalPoint(view->screen()->geometry(), hint.globalPoint)) continue;
                 QVariantMap item;
-                item.insert(QStringLiteral("x"), hint.globalPoint.x() - screen.x());
-                item.insert(QStringLiteral("y"), hint.globalPoint.y() - screen.y());
+                const QPointF local = NavigationMath::screenLocalPoint(
+                    hint.globalPoint, view->screen()->geometry());
+                item.insert(QStringLiteral("x"), local.x());
+                item.insert(QStringLiteral("y"), local.y());
                 item.insert(QStringLiteral("label"), hint.label.mid(m_prefix.size()));
                 hints << item;
             }

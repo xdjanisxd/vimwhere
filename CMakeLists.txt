@@ -13,7 +13,9 @@ pkg_check_modules(GOBJECT REQUIRED IMPORTED_TARGET gobject-2.0)
 
 qt_add_executable(vimwhere
     src/main.cpp
+    src/AccessibilityStatus.cpp src/AccessibilityStatus.h
     src/AppController.cpp src/AppController.h
+    src/HintScanRetry.cpp src/HintScanRetry.h
     src/KWinBridge.cpp src/KWinBridge.h
     src/TargetScanner.cpp src/TargetScanner.h
     src/OverlayView.cpp src/OverlayView.h
@@ -28,9 +30,15 @@ install(FILES kwin/main.js DESTINATION share/vimwhere/kwin)
 
 include(CTest)
 if(BUILD_TESTING)
-    qt_add_executable(target-scanner-test tests/target_scanner.cpp src/TargetScanner.cpp)
+    qt_add_executable(target-scanner-test tests/target_scanner.cpp src/TargetScanner.cpp src/HintScanRetry.cpp)
     target_link_libraries(target-scanner-test PRIVATE Qt6::Core PkgConfig::ATSPI PkgConfig::GOBJECT)
     add_test(NAME target_scanner COMMAND target-scanner-test)
+    qt_add_executable(hint-scan-retry-test tests/hint_scan_retry.cpp src/HintScanRetry.cpp)
+    target_link_libraries(hint-scan-retry-test PRIVATE Qt6::Core)
+    add_test(NAME hint_scan_retry COMMAND hint-scan-retry-test)
+    qt_add_executable(accessibility-status-test tests/accessibility_status.cpp src/AccessibilityStatus.cpp)
+    target_link_libraries(accessibility-status-test PRIVATE Qt6::Core Qt6::DBus PkgConfig::ATSPI)
+    add_test(NAME accessibility_status COMMAND accessibility-status-test)
     qt_add_executable(navigation-test tests/navigation.cpp)
     target_link_libraries(navigation-test PRIVATE Qt6::Core Qt6::Gui)
     add_test(NAME navigation COMMAND navigation-test)

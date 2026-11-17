@@ -29,6 +29,27 @@ int main(int argc, char **argv) {
                 "cell split across displays requires more narrowing");
     ok &= check(NavigationMath::visibleParts(QRectF(50, 50, 100, 100), staggered).size() == 1,
                 "single monitor cell can be clicked");
+    // Qt/KWin use logical coordinates here; scale changes physical pixel
+    // density, while each monitor's own origin determines its QML-local point.
+    const QRect leftScreen(-1600, -200, 1600, 900);  // e.g. 1.0 scale
+    const QRect rightScreen(0, 0, 2560, 1440);       // e.g. 1.5 scale
+    const QPointF leftHint(-800, 250);
+    const QPointF rightHint(1920, 1080);
+    ok &= check(NavigationMath::containsGlobalPoint(leftScreen, leftHint) &&
+                    NavigationMath::screenLocalPoint(leftHint, leftScreen) == QPointF(800, 450),
+                "hint on negative-origin display maps to local logical coordinates");
+    ok &= check(!NavigationMath::containsGlobalPoint(leftScreen, rightHint) &&
+                    NavigationMath::containsGlobalPoint(rightScreen, rightHint) &&
+                    NavigationMath::screenLocalPoint(rightHint, rightScreen) == QPointF(1920, 1080),
+                "scaled display hint stays in its own local logical coordinate space");
+    const auto rightBottom = NavigationMath::visibleParts(
+        NavigationMath::gridCell(QRectF(rightScreen), 9), {leftScreen, rightScreen});
+    ok &= check(rightBottom.size() == 1 &&
+                    qAbs(rightBottom.first().x() - 1706.6666666667) < 0.001 &&
+                    qAbs(rightBottom.first().y() - 960) < 0.001 &&
+                    qAbs(rightBottom.first().right() - QRectF(rightScreen).right()) < 0.001 &&
+                    qAbs(rightBottom.first().bottom() - QRectF(rightScreen).bottom()) < 0.001,
+                "grid on scaled display clips to the selected display bounds");
     if (ok) qInfo() << "navigation checks passed";
     return ok ? 0 : 1;
 }
