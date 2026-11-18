@@ -1,18 +1,15 @@
 #include "../src/TargetScanner.h"
-#include "../src/HintScanRetry.h"
 #include "../src/WindowMatcher.h"
 #include <QCoreApplication>
-#include <QEventLoop>
 #include <QJsonArray>
 #include <QDebug>
-#include <QTimer>
 #include <atspi/atspi.h>
 #include <array>
 
 // In-process AT-SPI provider: model Chromium's dormant tree and libatspi's
 // cached attributes/null child without requiring a desktop or browser.
 namespace {
-std::array<GObject *, 6> objects;
+std::array<GObject *, 7> objects;
 bool active = false;
 bool multiWindow = false;
 bool sameSizeTop = false;
@@ -22,8 +19,15 @@ bool cachedNullChild = true;
 bool attributeFailure = false;
 bool delayedProvider = false;
 bool zeroChildDelay = false;
+bool partialTreeDelay = false;
+bool busyRoot = false;
 int activations = 0;
 int attributeRequests = 0;
+int cacheClears = 0;
+int appTopListReads = 0;
+int targetNameReads = 0;
+int targetBoundsReads = 0;
+int firstButtonX = 20;
 int indexOf(const void *object) {
     for (int i = 0; i < int(objects.size()); ++i)
         if (objects[i] == object) return i;
@@ -48,8 +52,15 @@ void reset(bool enabled = false) {
     attributeFailure = false;
     delayedProvider = false;
     zeroChildDelay = false;
+    partialTreeDelay = false;
+    busyRoot = false;
     activations = 0;
     attributeRequests = 0;
+    cacheClears = 0;
+    appTopListReads = 0;
+    targetNameReads = 0;
+    targetBoundsReads = 0;
+    firstButtonX = 20;
 }
 QJsonObject multiWindowSnapshot() {
     return {{"windows", QJsonArray{
@@ -68,8 +79,12 @@ AtspiAccessible *atspi_get_desktop(gint) { return ref<AtspiAccessible>(0); }
 gint atspi_accessible_get_child_count(AtspiAccessible *obj, GError **) {
     const int i = indexOf(obj);
     if (i == 0) return 1;
-    if (i == 1) return multiWindow ? 2 : 1;
+    if (i == 1) {
+        ++appTopListReads;
+        return multiWindow ? 2 : 1;
+    }
     if (i == 2 && zeroChildDelay && attributeRequests < 2) return 0;
+    if (i == 2 && partialTreeDelay && attributeRequests >= 3) return 2;
     if (i == 2 || i == 4) return 1;
     return 0;
 }
@@ -84,31 +99,44 @@ AtspiAccessible *atspi_accessible_get_child_at_index(AtspiAccessible *obj, gint 
     }
     if ((i == 2 || i == 4) && child == 0 && !(i == 2 && (!active || cachedNullChild)))
         return ref<AtspiAccessible>(i + 1);
+    if (i == 2 && child == 1 && partialTreeDelay && attributeRequests >= 3)
+        return ref<AtspiAccessible>(6);
     return nullptr;
 }
 guint atspi_accessible_get_process_id(AtspiAccessible *, GError **) { return 42; }
 gchar *atspi_accessible_get_name(AtspiAccessible *obj, GError **) {
     const int i = indexOf(obj);
-    return g_strdup(i == 3 || i == 5 ? "Button" :
-                    i == 4 ? (sameTitleTop ? "Fixture" : "Popup") : "Fixture");
+    if (i == 3 || i == 5 || i == 6) {
+        ++targetNameReads;
+        return g_strdup("Button");
+    }
+    return g_strdup(i == 4 && !sameTitleTop ? "Popup" : "Fixture");
 }
 AtspiRole atspi_accessible_get_role(AtspiAccessible *obj, GError **) {
     const int i = indexOf(obj);
-    return i == 3 || i == 5 ? ATSPI_ROLE_PUSH_BUTTON : ATSPI_ROLE_FRAME;
+    return i == 3 || i == 5 || i == 6 ? ATSPI_ROLE_PUSH_BUTTON : ATSPI_ROLE_FRAME;
 }
 AtspiComponent *atspi_accessible_get_component(AtspiAccessible *obj) { return ref<AtspiComponent>(indexOf(obj)); }
 AtspiRect *atspi_component_get_extents(AtspiComponent *obj, AtspiCoordType type, GError **) {
     check(type == ATSPI_COORD_TYPE_WINDOW, "Expected window-relative geometry");
     auto *rect = g_new(AtspiRect, 1);
     const int i = indexOf(obj);
-    *rect = i == 3 || i == 5 ? AtspiRect{20, 30, 80, 40} :
-        i == 4 && !sameSizeTop ? AtspiRect{0, 0, 470, 55} : AtspiRect{0, 0, 400, 300};
+    if (i == 3 || i == 5 || i == 6) {
+        ++targetBoundsReads;
+        *rect = AtspiRect{i == 6 ? 220 : firstButtonX, 30, 80, 40};
+    } else {
+        *rect = i == 4 && !sameSizeTop ? AtspiRect{0, 0, 470, 55} : AtspiRect{0, 0, 400, 300};
+    }
     return rect;
 }
 AtspiStateSet *atspi_accessible_get_state_set(AtspiAccessible *obj) { return ref<AtspiStateSet>(indexOf(obj)); }
-gboolean atspi_state_set_contains(AtspiStateSet *, AtspiStateType) { return true; }
+gboolean atspi_state_set_contains(AtspiStateSet *states, AtspiStateType type) {
+    return type == ATSPI_STATE_VISIBLE || type == ATSPI_STATE_SHOWING || type == ATSPI_STATE_SENSITIVE ||
+        (type == ATSPI_STATE_BUSY && busyRoot && indexOf(states) == 2);
+}
 void atspi_accessible_clear_cache(AtspiAccessible *obj) {
     if (indexOf(obj) != 2) return;
+    ++cacheClears;
     cachedAttributes = false;
     if (active && (!delayedProvider || attributeRequests >= 2)) cachedNullChild = false;
 }
@@ -139,6 +167,8 @@ int main(int argc, char **argv) {
           "Dormant tree must activate and discard its cached null child");
     check(result.targets[0].globalPoint == QPointF(160, 150), "Window-relative target must preserve placement");
     check(activations == 1, "Cached attributes must be refreshed to activate the provider");
+    check(result.metrics.visitedNodes == 2 && targetNameReads == 0,
+          "Read actionable geometry without requesting unused target names");
     reset();
     QJsonObject noProvider = snapshot();
     QJsonArray noProviderWindows = noProvider.value(QStringLiteral("windows")).toArray();
@@ -150,6 +180,9 @@ int main(int argc, char **argv) {
     check(noProviderResult.targets.isEmpty() && noProviderResult.matchedWindows == 0 &&
               noProviderResult.error.contains(QStringLiteral("no matching application windows")),
           "A missing AT-SPI provider must be distinguished from unsafe geometry");
+    check(appTopListReads == 0, "Skip applications with no eligible KWin window for their PID");
+    check(scanner.probe(noProvider).status == TargetScanner::ProbeStatus::NeedsHydration,
+          "A provider that has not registered yet may still appear during hydration");
     reset();
     multiWindow = true;
     const auto multiResult = scanner.scan(multiWindowSnapshot());
@@ -206,25 +239,43 @@ int main(int argc, char **argv) {
           "A later AT-SPI pass must discover a tree that initially reported zero children");
     reset();
     zeroChildDelay = true;
-    HintScanRetry retry;
-    QEventLoop loop;
-    int retryScans = 0;
-    TargetScanner::Result retriedResult;
-    retry.start([&] {
-        ++retryScans;
-        return scanner.scan(snapshot());
-    }, [&](TargetScanner::Result result) {
-        retriedResult = std::move(result);
-        loop.quit();
-    }, [] { return true; });
-    QTimer::singleShot(2000, &loop, &QEventLoop::quit);
-    loop.exec();
-    check(retryScans == 6 && retriedResult.targets.size() == 1,
-          "The first invocation must retry the real scanner until the delayed zero-child tree hydrates");
+    using ProbeStatus = TargetScanner::ProbeStatus;
+    const auto firstProbe = scanner.probe(snapshot());
+    check(firstProbe.status == ProbeStatus::NeedsHydration && firstProbe.metrics.probedWindows == 1 &&
+              firstProbe.metrics.visitedNodes == 0 && cacheClears == 2,
+          "A probe must activate the root and discard its cached zero-child response");
+    check(scanner.probe(snapshot()).status == ProbeStatus::Ready && targetBoundsReads == 0,
+          "A second probe can see the late root child without reading target geometry");
+    check(scanner.scan(snapshot()).targets.size() == 1 && targetBoundsReads == 1,
+          "The final full scan alone collects target geometry after probes");
+    reset();
+    delayedProvider = true;
+    check(scanner.probe(snapshot()).status == ProbeStatus::NeedsHydration,
+          "A positive child count with a null child still needs hydration");
+    check(scanner.probe(snapshot()).status == ProbeStatus::Ready,
+          "A later probe observes the child once the provider publishes it");
+    reset();
+    partialTreeDelay = true;
+    check(scanner.probe(snapshot()).status == ProbeStatus::Ready &&
+              scanner.probe(snapshot()).status == ProbeStatus::Ready && targetBoundsReads == 0,
+          "Identical healthy-looking shallow probes can precede the rest of the tree");
+    firstButtonX = 60;
+    const auto finalPass = scanner.scan(snapshot());
+    check(finalPass.targets.size() == 2 && targetBoundsReads == 2 &&
+              finalPass.targets.first().globalPoint == QPointF(200, 150),
+          "Use the final tree and its current geometry, including late controls");
+    reset();
+    busyRoot = true;
+    check(scanner.probe(snapshot()).status == ProbeStatus::NeedsHydration,
+          "A busy root with children still needs hydration");
+    check(scanner.probe({}).status == ProbeStatus::Failed,
+          "Missing geometry fails the probe before discovery");
     reset(); // Simulate provider disabling itself between invocations.
     check(scanner.scan(snapshot()).targets.size() == 1, "Repeated invocation must reactivate a dormant provider");
     reset(true);
     attributeFailure = true;
+    check(scanner.probe(snapshot()).status == ProbeStatus::NeedsHydration,
+          "Unsupported activation requests do not certify a root as ready");
     check(scanner.scan(snapshot()).targets.size() == 1, "Unsupported attributes must not discard an active tree");
     reset();
     const auto unsafeGeometry = scanner.scan(snapshot(false, true));
@@ -232,6 +283,8 @@ int main(int argc, char **argv) {
               unsafeGeometry.error.contains(QStringLiteral("No safely positioned")),
           "Mismatched window geometry must remain rejected as unsafe");
     check(activations == 0, "Do not activate rejected geometry");
+    check(scanner.probe(snapshot(false, true)).metrics.probedWindows == 0 && activations == 0,
+          "Reject unsafe geometry before probing or activating the provider");
     reset();
     check(scanner.scan(snapshot(true)).targets.isEmpty(), "Covered targets must remain rejected");
     for (auto *object : objects) {

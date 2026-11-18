@@ -1,7 +1,7 @@
 #include "AccessibilityStatus.h"
 
 #include <QDBusConnection>
-#include <QDBusInterface>
+#include <QDBusMessage>
 #include <QDBusReply>
 #include <QDBusVariant>
 #include <QVariant>
@@ -14,12 +14,16 @@ constexpr auto statusInterface = "org.a11y.Status";
 constexpr auto propertiesInterface = "org.freedesktop.DBus.Properties";
 constexpr int dbusTimeoutMs = 1500;
 
+QDBusMessage callPropertyMethod(const QString &method, const QVariantList &arguments) {
+    auto message = QDBusMessage::createMethodCall(QString::fromLatin1(busService),
+        QString::fromLatin1(busPath), QString::fromLatin1(propertiesInterface), method);
+    message.setArguments(arguments);
+    return QDBusConnection::sessionBus().call(message, QDBus::Block, dbusTimeoutMs);
+}
+
 bool readEnabled(bool *enabled, QString *error) {
-    QDBusInterface properties(QString::fromLatin1(busService), QString::fromLatin1(busPath),
-                              QString::fromLatin1(propertiesInterface), QDBusConnection::sessionBus());
-    properties.setTimeout(dbusTimeoutMs);
-    const QDBusReply<QDBusVariant> reply = properties.call(QStringLiteral("Get"),
-        QString::fromLatin1(statusInterface), QStringLiteral("IsEnabled"));
+    const QDBusReply<QDBusVariant> reply = callPropertyMethod(QStringLiteral("Get"),
+        {QString::fromLatin1(statusInterface), QStringLiteral("IsEnabled")});
     if (!reply.isValid()) {
         if (error) *error = QStringLiteral("Cannot read AT-SPI IsEnabled status: %1")
             .arg(reply.error().message());
@@ -30,12 +34,9 @@ bool readEnabled(bool *enabled, QString *error) {
 }
 
 bool setEnabled(QString *error) {
-    QDBusInterface properties(QString::fromLatin1(busService), QString::fromLatin1(busPath),
-                              QString::fromLatin1(propertiesInterface), QDBusConnection::sessionBus());
-    properties.setTimeout(dbusTimeoutMs);
-    const QDBusReply<void> reply = properties.call(QStringLiteral("Set"),
-        QString::fromLatin1(statusInterface), QStringLiteral("IsEnabled"),
-        QVariant::fromValue(QDBusVariant(true)));
+    const QDBusReply<void> reply = callPropertyMethod(QStringLiteral("Set"),
+        {QString::fromLatin1(statusInterface), QStringLiteral("IsEnabled"),
+         QVariant::fromValue(QDBusVariant(true))});
     if (reply.isValid()) return true;
     if (error) *error = QStringLiteral("Cannot enable AT-SPI for this session: %1")
         .arg(reply.error().message());
@@ -60,6 +61,9 @@ bool AccessibilityStatus::ensureEnabled(const ReadEnabled &read, const SetEnable
 bool AccessibilityStatus::enableForSession(QString *error) {
     const int initStatus = atspi_init();
     if (initStatus != 0 && initStatus != 1) {
+        // libatspi can leave its initialized flag set after a bus failure.
+        // Reset it so a later shortcut can retry initialization.
+        atspi_exit();
         if (error) *error = QStringLiteral("AT-SPI initialization failed (code %1)").arg(initStatus);
         return false;
     }

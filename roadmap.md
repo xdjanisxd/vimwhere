@@ -18,7 +18,7 @@ Bu sıra, mevcut KDE Wayland, Qt ve AT-SPI mimarisini koruyarak en büyük doğr
 
 **Hedef:** Erişilebilirlik ağacı hazır olduğunda beklemeyi azaltırken hedef listesinin tutarlı kalmasını sağlamak.
 
-**Mevcut sorun:** Hint modu altı taramayı 80 ms aralıkla yürütüyor ve yalnızca son taramanın hedeflerini kullanıyor. Tarama başına süre, ziyaret edilen öğe ve limit nedeniyle kesilme görünürlüğü yok.
+**Mevcut durum:** Hint modu beş hafif yoklamadan sonra tek bir hedef taraması yapıyor. Ölçüm günlükleri tarama süresini, ziyaret edilen düğümleri ve limit nedeniyle kesilmeleri gösteriyor.
 
 **Yaklaşım:** Tarama süresi, ziyaret edilen düğüm, bulunan hedef ve bütçe/derinlik kesilmesini ölç. Erken tamamlanma koşulunu yalnızca aynı snapshot içindeki hedeflerin kararlı olduğu kanıtlanırsa pilotla; zaman aşımı ve mevcut son tarama fallback'ini koru. Büyük ve geç yüklenen ağaçlarda ölçümleri karşılaştır.
 

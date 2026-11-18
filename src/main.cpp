@@ -1,4 +1,5 @@
 #include "AppController.h"
+#include "HintScanChild.h"
 
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -6,6 +7,7 @@
 #include <QScreen>
 #include <QTextStream>
 #include <atspi/atspi.h>
+#include <cstring>
 #ifdef VIMWHERE_LIVE_RELOAD
 #include <QDebug>
 #include <systemd/sd-daemon.h>
@@ -37,6 +39,7 @@ static int diagnose() {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc == 2 && std::strcmp(argv[1], "--hint-worker") == 0) return runHintScanChild(argc, argv);
     QGuiApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Vimwhere"));
     QCoreApplication::setApplicationName(QStringLiteral("vimwhere"));

@@ -9,6 +9,7 @@ find_package(KF6GlobalAccel REQUIRED)
 find_package(LayerShellQt REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ATSPI REQUIRED IMPORTED_TARGET atspi-2)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 pkg_check_modules(GOBJECT REQUIRED IMPORTED_TARGET gobject-2.0)
 
 qt_add_executable(vimwhere
@@ -16,13 +17,16 @@ qt_add_executable(vimwhere
     src/AccessibilityStatus.cpp src/AccessibilityStatus.h
     src/AppController.cpp src/AppController.h
     src/HintScanRetry.cpp src/HintScanRetry.h
+    src/HintScanWorker.cpp src/HintScanWorker.h
+    src/HintScanProtocol.cpp src/HintScanProtocol.h
+    src/HintScanChild.cpp src/HintScanChild.h
     src/KWinBridge.cpp src/KWinBridge.h
     src/TargetScanner.cpp src/TargetScanner.h
     src/OverlayView.cpp src/OverlayView.h
     src/PortalClicker.cpp src/PortalClicker.h
 )
 target_link_libraries(vimwhere PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::DBus
-    KF6::GlobalAccel LayerShellQt::Interface PkgConfig::ATSPI PkgConfig::GOBJECT)
+    KF6::GlobalAccel LayerShellQt::Interface PkgConfig::ATSPI PkgConfig::GLIB PkgConfig::GOBJECT)
 target_compile_definitions(vimwhere PRIVATE VIMWHERE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 install(TARGETS vimwhere RUNTIME DESTINATION bin)
 install(FILES qml/Overlay.qml DESTINATION share/vimwhere/qml)
@@ -30,10 +34,11 @@ install(FILES kwin/main.js DESTINATION share/vimwhere/kwin)
 
 include(CTest)
 if(BUILD_TESTING)
-    qt_add_executable(target-scanner-test tests/target_scanner.cpp src/TargetScanner.cpp src/HintScanRetry.cpp)
+    qt_add_executable(target-scanner-test tests/target_scanner.cpp src/TargetScanner.cpp)
     target_link_libraries(target-scanner-test PRIVATE Qt6::Core PkgConfig::ATSPI PkgConfig::GOBJECT)
     add_test(NAME target_scanner COMMAND target-scanner-test)
-    qt_add_executable(hint-scan-retry-test tests/hint_scan_retry.cpp src/HintScanRetry.cpp)
+    qt_add_executable(hint-scan-retry-test tests/hint_scan_retry.cpp
+        src/HintScanRetry.cpp src/HintScanWorker.cpp src/HintScanProtocol.cpp)
     target_link_libraries(hint-scan-retry-test PRIVATE Qt6::Core)
     add_test(NAME hint_scan_retry COMMAND hint-scan-retry-test)
     qt_add_executable(accessibility-status-test tests/accessibility_status.cpp src/AccessibilityStatus.cpp)

@@ -1,14 +1,24 @@
+#include "../src/HintScanProtocol.h"
 #include "../src/HintScanRetry.h"
+#include "../src/HintScanWorker.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
+#include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QVector>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
+#include <utility>
 
 namespace {
+using ProbeResult = TargetScanner::ProbeResult;
+using ProbeStatus = TargetScanner::ProbeStatus;
+
 void check(bool condition, const char *message) {
     if (!condition) {
         std::fprintf(stderr, "%s\n", message);
@@ -16,115 +26,346 @@ void check(bool condition, const char *message) {
     }
 }
 
-void runLoop(QEventLoop &loop, int timeoutMs) {
+void runLoop(QEventLoop &loop) {
     QTimer timeout;
     timeout.setSingleShot(true);
-    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timeout.start(timeoutMs);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, [] {
+        check(false, "Timed out waiting for the hint scan");
+    });
+    timeout.start(4000);
     loop.exec();
 }
 
-TargetScanner::Result resultWithTargets(int count) {
+TargetScanner::Result resultForTarget(int position) {
     TargetScanner::Result result;
-    for (int i = 0; i < count; ++i) {
-        HintTarget target;
-        target.globalPoint = QPointF(i + 1, count);
-        result.targets.push_back(target);
-    }
+    HintTarget target;
+    target.globalPoint = QPointF(position, position);
+    result.targets.push_back(target);
     return result;
+}
+
+ProbeResult probeResult(ProbeStatus status) {
+    ProbeResult result;
+    result.status = status;
+    return result;
+}
+
+void testHydrationAndFinalSnapshot() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    QElapsedTimer elapsed;
+    QVector<qint64> probeTimes;
+    int finalScans = 0;
+    int position = 0;
+    qint64 finalTime = 0;
+    elapsed.start();
+
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        probeTimes.push_back(elapsed.elapsed());
+        // The provider starts empty, briefly shows a target, and replaces it before collection.
+        if (probeTimes.size() >= 2) position = 10;
+        done(probeResult(position ? ProbeStatus::Ready : ProbeStatus::NeedsHydration));
+    }, [&](HintScanRetry::Done done) {
+        ++finalScans;
+        finalTime = elapsed.elapsed();
+        position = 20;
+        done(resultForTarget(position));
+    }, [&](TargetScanner::Result result) {
+        check(result.targets.size() == 1 && result.targets.first().globalPoint == QPointF(20, 20),
+              "Publish the late target at the position from the final snapshot");
+        loop.quit();
+    }, [] { return true; });
+    runLoop(loop);
+
+    check(probeTimes.size() == 5 && finalScans == 1,
+          "Use five shallow probes and one final full collection even when a probe is ready");
+    for (int i = 1; i < probeTimes.size(); ++i)
+        check(probeTimes[i] >= i * 80 - 5,
+              "The probes must respect their 80 ms schedule");
+    check(finalTime >= 395,
+          "Preserve the roughly 400 ms hydration window before collecting targets");
+    check(!retry.isActive(), "The retry scheduler must finish after publishing the result");
+}
+
+void testDisappearingTarget() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    int probes = 0;
+    int finalScans = 0;
+    const QString error = QStringLiteral("No safely positioned accessible targets found");
+
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        ++probes;
+        // Earlier probes saw a provider tree that disappears before collection.
+        done(probeResult(probes < 5 ? ProbeStatus::Ready : ProbeStatus::NeedsHydration));
+    }, [&](HintScanRetry::Done done) {
+        ++finalScans;
+        TargetScanner::Result empty;
+        empty.error = error;
+        done(std::move(empty));
+    }, [&](TargetScanner::Result result) {
+        check(result.targets.isEmpty() && result.error == error,
+              "Publish the final empty result when an earlier provider disappears");
+        loop.quit();
+    }, [] { return true; });
+    runLoop(loop);
+    check(probes == 5 && finalScans == 1, "Hydration expiry still collects exactly one snapshot");
+}
+
+void testFailedProbe() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    int probes = 0;
+    int finalScans = 0;
+
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        ProbeResult result = probeResult(++probes == 1 ? ProbeStatus::Failed : ProbeStatus::Ready);
+        if (probes == 1) result.error = QStringLiteral("Unable to inspect accessibility trees");
+        done(std::move(result));
+    }, [&](HintScanRetry::Done done) {
+        ++finalScans;
+        done(resultForTarget(1));
+    }, [&](TargetScanner::Result result) {
+        check(result.targets.size() == 1 && result.error.isEmpty(),
+              "Only the final collection can supply targets or report their scan error");
+        loop.quit();
+    }, [] { return true; });
+    runLoop(loop);
+    check(probes == 5 && finalScans == 1, "Continue through a transient early probe failure");
+}
+
+void testStaleFocusAndCallback() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    HintScanRetry::ProbeDone staleProbe;
+    bool isCurrent = true;
+
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        staleProbe = std::move(done);
+        loop.quit();
+    }, [](HintScanRetry::Done) {
+        check(false, "A stale generation must not collect targets");
+    }, [](TargetScanner::Result) {
+        check(false, "A stale generation must not publish hints");
+    }, [&] { return isCurrent; });
+    runLoop(loop);
+    isCurrent = false;
+    staleProbe(probeResult(ProbeStatus::Ready));
+    check(!retry.isActive(), "An in-flight probe from a stale focus snapshot must cancel");
+
+    HintScanRetry::Done staleResult;
+    retry.start([](HintScanRetry::ProbeDone done) {
+        done(probeResult(ProbeStatus::Ready));
+    }, [&](HintScanRetry::Done done) {
+        staleResult = std::move(done);
+        loop.quit();
+    }, [](TargetScanner::Result) {
+        check(false, "A replaced generation must not publish hints");
+    }, [] { return true; });
+    runLoop(loop);
+
+    int newProbes = 0;
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        ++newProbes;
+        done(probeResult(ProbeStatus::Ready));
+    }, [](HintScanRetry::Done done) {
+        done(resultForTarget(2));
+    }, [&](TargetScanner::Result result) {
+        check(result.targets.size() == 1 && result.targets.first().globalPoint == QPointF(2, 2),
+              "Publish the newest final result even if the replaced scan replies");
+        loop.quit();
+    }, [] { return true; });
+    staleResult(resultForTarget(1));
+    runLoop(loop);
+    check(newProbes == 5, "A queued stale callback must not interrupt the new generation");
+}
+
+void writeMarker(const QString &path) {
+    QFile marker(path);
+    check(marker.open(QIODevice::WriteOnly), "Create the fixture marker");
+}
+
+QJsonObject snapshotFor(int request) {
+    return {{QStringLiteral("request"), request}};
+}
+
+int fakeHelper(const QString &mode, const QString &directory) {
+    using namespace HintScanProtocol;
+    const int pid = int(QCoreApplication::applicationPid());
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        const auto request = decodeRequest(QByteArray::fromStdString(line));
+        check(request.has_value(), "Decode a request sent by the worker");
+        QJsonObject result;
+        switch (request->operation) {
+        case Operation::Prepare:
+            if (mode == QStringLiteral("hold-prepare")) {
+                writeMarker(directory + QStringLiteral("/started"));
+                QElapsedTimer deadline;
+                deadline.start();
+                while (!QFile::exists(directory + QStringLiteral("/release"))) {
+                    check(!deadline.hasExpired(6000), "The owner thread must release the startup fixture");
+                    QThread::msleep(5);
+                }
+            }
+            result.insert(QStringLiteral("error"), QStringLiteral(""));
+            break;
+        case Operation::Probe: {
+            auto probe = probeResult(ProbeStatus::Ready);
+            probe.matchedWindows = pid;
+            result = encodeProbe(probe);
+            break;
+        }
+        case Operation::Scan: {
+            const int number = request->snapshot.value(QStringLiteral("request")).toInt();
+            check(number == 1 || number == 2, "Superseded pending operations must never reach the helper");
+            if (mode == QStringLiteral("hold-scan") && number == 1) {
+                writeMarker(directory + QStringLiteral("/started"));
+                // This request can only finish after the parent's deadline or after it kills the helper.
+                QThread::sleep(10);
+            }
+            if (mode == QStringLiteral("exit-scan") && number == 1) return 1;
+            auto scan = resultForTarget(number);
+            scan.matchedWindows = pid;
+            result = encodeScan(scan);
+            break;
+        }
+        }
+        const QByteArray response = encode(Response{request->id, std::move(result)});
+        std::cout.write(response.constData(), response.size()) << std::flush;
+    }
+    return 0;
+}
+
+void testSlowWorkerCancellation() {
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create a fixture directory for the blocked helper");
+    QEventLoop loop;
+    HintScanRetry retry;
+    int heartbeats = 0;
+    int completions = 0;
+    int pids[2] = {};
+    bool restarted = false;
+    auto *ownerThread = QThread::currentThread();
+    HintScanWorker worker(QCoreApplication::applicationFilePath(),
+        {QStringLiteral("--fake-hint-helper"), QStringLiteral("hold-scan"), directory.path()});
+    const auto start = [&](int request) {
+        retry.start([&, request](HintScanRetry::ProbeDone done) {
+            worker.probe(snapshotFor(request), [&, request, done = std::move(done)](ProbeResult result) {
+                check(result.error.isEmpty() && result.status == ProbeStatus::Ready,
+                      "Read the child process's probe result");
+                int &pid = pids[request - 1];
+                if (pid == 0) pid = result.matchedWindows;
+                check(pid == result.matchedWindows && pid > 0 && pid != QCoreApplication::applicationPid(),
+                      "Reuse a separate helper process throughout the hydration probes");
+                done(std::move(result));
+            });
+        }, [&, request](HintScanRetry::Done done) {
+            worker.scan(snapshotFor(request), std::move(done));
+        }, [&, request](TargetScanner::Result result) {
+            check(QThread::currentThread() == ownerThread, "Publish results on the owner thread");
+            ++completions;
+            check(request == 2 && result.targets.size() == 1 && result.targets.first().globalPoint == QPointF(2, 2),
+                  "Publish only the newest worker result after restarting");
+            check(result.matchedWindows == pids[1] && pids[1] != pids[0],
+                  "The newest invocation must use one fresh helper for probes and final collection");
+            loop.quit();
+        }, [] { return true; });
+    };
+
+    const QString started = directory.filePath(QStringLiteral("started"));
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, &loop, [&] {
+        if (restarted || !QFile::exists(started)) return;
+        if (++heartbeats < 3) return;
+        retry.cancel();
+        worker.cancel();
+        restarted = true;
+        start(2);
+    });
+    heartbeat.start(5);
+    worker.prepare([&](QString error) {
+        check(QThread::currentThread() == ownerThread, "Preparation must reply on the owner thread");
+        check(error.isEmpty(), "Expected successful mock AT-SPI preparation");
+        start(1);
+    });
+    runLoop(loop);
+
+    check(heartbeats == 3 && completions == 1,
+          "The owner heartbeat, cancel, and restart must work during a blocked scan");
+}
+
+void testNewestPendingOperation() {
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create a fixture directory for the blocked warm-up");
+    QEventLoop loop;
+    HintScanWorker worker(QCoreApplication::applicationFilePath(),
+        {QStringLiteral("--fake-hint-helper"), QStringLiteral("hold-prepare"), directory.path()});
+    bool startupCompleted = false;
+    worker.warmUp([&](QString error) {
+        check(error.isEmpty(), "Startup preparation can finish after shortcut cancellation");
+        startupCompleted = true;
+    });
+
+    const QString started = directory.filePath(QStringLiteral("started"));
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+        if (!QFile::exists(started)) return;
+        poll.stop();
+        worker.cancel();
+        for (int request : {3, 4}) {
+            worker.scan(snapshotFor(request), [](TargetScanner::Result) {
+                check(false, "A superseded pending operation must not publish a result");
+            });
+        }
+        worker.scan(snapshotFor(2), [&](TargetScanner::Result result) {
+            check(startupCompleted && result.targets.size() == 1 &&
+                  result.targets.first().globalPoint == QPointF(2, 2),
+                  "Finish startup and run only the newest pending request");
+            loop.quit();
+        });
+        writeMarker(directory.filePath(QStringLiteral("release")));
+    });
+    poll.start(5);
+    runLoop(loop);
+}
+
+void testHelperExitAndRecovery() {
+    QEventLoop loop;
+    HintScanWorker worker(QCoreApplication::applicationFilePath(),
+        {QStringLiteral("--fake-hint-helper"), QStringLiteral("exit-scan"), QStringLiteral("")});
+    worker.probe(snapshotFor(1), [&](ProbeResult probe) {
+        const int exitedPid = probe.matchedWindows;
+        check(probe.status == ProbeStatus::Ready && exitedPid > 0, "Read the original helper PID");
+        worker.scan(snapshotFor(1), [&, exitedPid](TargetScanner::Result failed) {
+            check(!failed.error.isEmpty() && failed.targets.isEmpty(),
+                  "Report a failed scan when the helper exits before replying");
+            worker.scan(snapshotFor(2), [&, exitedPid](TargetScanner::Result result) {
+                check(result.error.isEmpty() && result.targets.size() == 1 &&
+                      result.targets.first().globalPoint == QPointF(2, 2),
+                      "Recover the next scan after an unexpected helper exit");
+                check(result.matchedWindows > 0 && result.matchedWindows != exitedPid,
+                      "Launch a fresh helper after unexpected exit");
+                loop.quit();
+            });
+        });
+    });
+    runLoop(loop);
 }
 }
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
-    HintScanRetry retry;
-    QEventLoop loop;
-    int scans = 0;
-    int heartbeats = 0;
-    QElapsedTimer elapsed;
-    QVector<qint64> scanTimes;
-    TargetScanner::Result completed;
-    QTimer heartbeat;
-    heartbeat.setInterval(5);
-    QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++heartbeats; });
-    heartbeat.start();
-    elapsed.start();
+    const auto arguments = app.arguments();
+    if (arguments.size() == 4 && arguments[1] == QStringLiteral("--fake-hint-helper"))
+        return fakeHelper(arguments[2], arguments[3]);
 
-    const int partialTree[] = {1, 3, 2, 5, 4, 6};
-    retry.start([&] {
-        scanTimes.push_back(elapsed.elapsed());
-        const int count = partialTree[scans++];
-        return resultWithTargets(count);
-    }, [&](TargetScanner::Result result) {
-        completed = std::move(result);
-        loop.quit();
-    }, [] { return true; });
-    runLoop(loop, 1500);
-    check(scans == 6, "Retry must inspect the tree for the full bounded window");
-    check(completed.targets.size() == 6, "Use the final partial-tree snapshot");
-    check(completed.targets.first().globalPoint.y() == 6,
-          "Do not merge coordinates from snapshots taken at different times");
-    check(heartbeats >= 4, "Retry delays must return control to the event loop");
-    check(scanTimes.size() == 6, "Record all bounded retry scan times");
-    for (int i = 1; i < scanTimes.size(); ++i)
-        check(scanTimes[i] - scanTimes[i - 1] >= 60,
-              "Retry scans must respect the 80 ms event-loop interval");
-    check(scanTimes.last() - scanTimes.first() >= 300,
-          "The hydration window must span multiple delayed retries");
-
-    int delayedZeroChildren = 0;
-    bool lateTargetFound = false;
-    retry.start([&] {
-        if (++delayedZeroChildren == 1) {
-            TargetScanner::Result result;
-            result.error = QStringLiteral("No safely positioned accessible targets found");
-            return result;
-        }
-        return resultWithTargets(1);
-    }, [&](TargetScanner::Result result) {
-        lateTargetFound = result.targets.size() == 1;
-        loop.quit();
-    }, [] { return true; });
-    runLoop(loop, 1000);
-    check(delayedZeroChildren == 6 && lateTargetFound,
-          "Keep scanning through the bounded hydration window after an initial zero-child result");
-
-    int emptyAttempts = 0;
-    bool emptyResult = false;
-    retry.start([&] {
-        if (++emptyAttempts == 1) return resultWithTargets(2);
-        TargetScanner::Result result;
-        result.error = QStringLiteral("No safely positioned accessible targets found");
-        return result;
-    }, [&](TargetScanner::Result result) {
-        emptyResult = result.targets.isEmpty() && !result.error.isEmpty();
-        loop.quit();
-    }, [] { return true; });
-    runLoop(loop, 1500);
-    check(emptyResult && emptyAttempts == 6,
-          "A final empty scan must not publish stale targets from an earlier scan");
-
-    bool canceledCompletion = false;
-    scans = 0;
-    retry.start([&] { ++scans; return TargetScanner::Result{}; },
-        [&](TargetScanner::Result) { canceledCompletion = true; }, [] { return true; });
-    QTimer::singleShot(10, &retry, &HintScanRetry::cancel);
-    runLoop(loop, 150);
-    check(scans == 1 && !canceledCompletion, "Canceled scan must not continue or publish a result");
-
-    bool staleCompletion = false;
-    retry.start([] { return resultWithTargets(1); },
-        [&](TargetScanner::Result) { staleCompletion = true; }, [] { return false; });
-    check(!staleCompletion, "A scan whose focus snapshot changed must be discarded");
-
-    bool restarted = false;
-    int restartScans = 0;
-    retry.start([&] { ++restartScans; return resultWithTargets(2); },
-        [&](TargetScanner::Result result) {
-            restarted = result.targets.size() == 2;
-            loop.quit();
-        }, [] { return true; });
-    runLoop(loop, 1000);
-    check(restarted && restartScans == 6, "A new invocation must start cleanly after cancellation");
+    testHydrationAndFinalSnapshot();
+    testDisappearingTarget();
+    testFailedProbe();
+    testStaleFocusAndCallback();
+    testSlowWorkerCancellation();
+    testNewestPendingOperation();
+    testHelperExitAndRecovery();
     return 0;
 }

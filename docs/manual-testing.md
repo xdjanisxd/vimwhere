@@ -29,6 +29,20 @@ These are manual acceptance checks for the KDE Wayland desktop hint prototype. T
 - [ ] **Configured shortcuts:** Change the QSettings keys `shortcuts/hints` and `shortcuts/grid` to non-default combinations, restart Vimwhere, and confirm the configured combinations invoke the matching modes while the defaults no longer invoke them. Check for collisions with KDE shortcuts.
 - [ ] **KWin restart and cleanup:** Start Vimwhere, open a mode, cancel it, then restart KWin while the app is running. Check that the app does not use stale window geometry and record whether it recovers or needs a relaunch. Quit Vimwhere and check that its portal session closes, overlays disappear, and no orphaned KWin script keeps attempting callbacks; record any cleanup behavior that needs a follow-up fix.
 
+## Hint latency
+
+In a Plasma Wayland test session, quit any existing Vimwhere instance to free its shortcuts. Launch the build from the repository root with performance logging enabled.
+
+```sh
+QT_LOGGING_RULES='vimwhere.hints.performance.debug=true' ./build/vimwhere 2>&1 | tee /tmp/vimwhere-hint-latency.log
+```
+
+Grant portal consent first. Use the same visible windows, monitor layout, and focus for each comparison. Test a Dolphin window, a large Chromium page, and an Electron app with known interactive controls. For each workload, record an invocation after reopening the target application and several repeated invocations with the application still open. Press `Ctrl+Alt+F` for each sample, verify the expected controls have hints, and press Esc before the next sample.
+
+- [ ] Group log entries by their `hint` invocation number. Record `elapsed_ms` for `phase=overlay-request` and `phase=first-frame` separately. Compare median and slow samples separately for first and repeated invocations. If the baseline lacks performance logs, film the shortcut press and overlay appearance together for both builds and count the frames between them.
+- [ ] Record `phase=accessibility-startup` once per launch and `phase=accessibility`, `phase=probe`, and `phase=final-scan` timings for each invocation. Record matched windows, visited nodes, target count, and traversal limits. A completed run should show five shallow probes and one final scan. Compare hint coverage against the baseline and look for any late-loading or newly missing controls.
+- [ ] Press `Ctrl+Alt+G` during hydration. Confirm grid mode stays visible without late hints. Press Esc to close it, then invoke hints again and verify the expected targets. Repeat with two quick presses of `Ctrl+Alt+F` and check that only the second invocation shows hints.
+
 ## Run record
 
 | Date | Plasma / KWin | Qt | Displays / scale | Check | Result / notes |

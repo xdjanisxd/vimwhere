@@ -1,13 +1,13 @@
 #include "AppController.h"
 #include "OverlayView.h"
 #include "NavigationMath.h"
-#include "AccessibilityStatus.h"
 
 #include <QAction>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QKeySequence>
+#include <QLoggingCategory>
 #include <QQuickItem>
 #include <QScreen>
 #include <QSettings>
@@ -16,18 +16,59 @@
 #include <QDebug>
 #include <KGlobalAccel>
 
-AppController::AppController(QObject *parent) : QObject(parent), m_kwin(this), m_portal(this) {
+namespace {
+Q_LOGGING_CATEGORY(hintPerformance, "vimwhere.hints.performance", QtWarningMsg)
+
+QElapsedTimer startedTimer() {
+    QElapsedTimer timer;
+    timer.start();
+    return timer;
+}
+
+QJsonObject hintLayout(QJsonObject snapshot) {
+    snapshot.remove(QStringLiteral("cursor"));
+    return snapshot;
+}
+
+const char *probeStatusName(TargetScanner::ProbeStatus status) {
+    switch (status) {
+    case TargetScanner::ProbeStatus::Ready: return "ready";
+    case TargetScanner::ProbeStatus::NeedsHydration: return "needs-hydration";
+    case TargetScanner::ProbeStatus::Failed: return "failed";
+    }
+    return "unknown";
+}
+
+void logHintScan(quint64 invocation, const char *phase, int attempt, const QElapsedTimer &timer,
+                 const TargetScanner::Metrics &metrics, int matched, int unmatched,
+                 int targets, const char *status) {
+    qCDebug(hintPerformance).nospace() << "hint=" << invocation << " phase=" << phase
+        << " attempt=" << attempt << " elapsed_ms=" << timer.elapsed()
+        << " status=" << status << " matching_ms=" << metrics.matchingMs
+        << " activation_ms=" << metrics.activationMs << " traversal_ms=" << metrics.traversalMs
+        << " matched_windows=" << matched << " unmatched_windows=" << unmatched
+        << " probed_windows=" << metrics.probedWindows << " visited_nodes=" << metrics.visitedNodes
+        << " targets=" << targets << " depth_limit=" << metrics.depthLimitReached
+        << " node_limit=" << metrics.nodeLimitReached << " child_limit=" << metrics.childLimitReached;
+}
+}
+
+AppController::AppController(QObject *parent)
+    : QObject(parent), m_kwin(this), m_portal(this) {
     connect(&m_portal, &PortalClicker::clickFinished, this,
         [this](bool success, const QString &error) { if (!success) showError(error); });
     connect(&m_portal, &PortalClicker::sessionFailed, this,
         [this](const QString &error) { showError(QStringLiteral("Pointer permission failed: %1").arg(error)); });
     connect(qApp, &QGuiApplication::screenAdded, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
-        else if (m_hintScanRetry.isActive()) m_hintScanRetry.cancel();
+        else cancelHintScan();
     });
     connect(qApp, &QGuiApplication::screenRemoved, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
-        else if (m_hintScanRetry.isActive()) m_hintScanRetry.cancel();
+        else cancelHintScan();
+    });
+    connect(&m_kwin, &KWinBridge::snapshotChanged, this, [this] {
+        if (m_hintLayout && !isHintScanCurrent()) cancelHintScan();
     });
 }
 
@@ -40,9 +81,11 @@ bool AppController::start() {
         qCritical().noquote() << m_kwin.errorString();
         return false;
     }
-    QString accessibilityError;
-    if (!AccessibilityStatus::enableForSession(&accessibilityError))
-        qWarning().noquote() << "AT-SPI startup:" << accessibilityError;
+    m_hintScanWorker.warmUp([timer = startedTimer()](const QString &error) {
+        qCDebug(hintPerformance).nospace() << "phase=accessibility-startup elapsed_ms="
+            << timer.elapsed() << " ok=" << error.isEmpty();
+        if (!error.isEmpty()) qWarning().noquote() << "AT-SPI startup:" << error;
+    });
     QSettings settings;
     const QKeySequence hintKey(settings.value(QStringLiteral("shortcuts/hints"),
         QStringLiteral("Ctrl+Alt+F")).toString());
@@ -91,59 +134,74 @@ void AppController::ensureOverlays() {
 }
 
 void AppController::openHints() {
+    const QElapsedTimer openedAt = startedTimer();
     closeMode();
     if (!m_portal.isReady()) {
         m_portal.prepare();
         qInfo() << "Complete the portal permission dialog, then press the hint shortcut again";
         return;
     }
-    QString accessibilityError;
-    if (!AccessibilityStatus::enableForSession(&accessibilityError)) {
-        showError(accessibilityError);
-        return;
-    }
     if (!m_kwin.isReady()) {
         showError(QStringLiteral("KWin geometry bridge is not ready: %1").arg(m_kwin.errorString()));
         return;
     }
-    const QJsonObject initialSnapshot = m_kwin.snapshot();
-    const QString activeWindow = initialSnapshot.value(QStringLiteral("activeWindow")).toString();
-    const QString activeScreen = initialSnapshot.value(QStringLiteral("activeScreen")).toString();
-    QJsonValue activeClient, activeFrame;
-    for (const auto &value : initialSnapshot.value(QStringLiteral("windows")).toArray()) {
-        const auto window = value.toObject();
-        if (window.value(QStringLiteral("id")).toString() == activeWindow) {
-            activeClient = window.value(QStringLiteral("client"));
-            activeFrame = window.value(QStringLiteral("frame"));
-            break;
-        }
-    }
+    m_hintOpenedAt = openedAt;
+    const quint64 invocation = ++m_hintInvocation;
+    m_hintProbeNumber = 0;
+    m_hintLayout = hintLayout(m_kwin.snapshot());
+    m_hintScanWorker.prepare([this, invocation, timer = startedTimer()](const QString &error) {
+        if (!isHintScanCurrent()) { cancelHintScan(); return; }
+        qCDebug(hintPerformance).nospace() << "hint=" << invocation << " phase=accessibility elapsed_ms="
+            << timer.elapsed() << " ok=" << error.isEmpty();
+        if (!error.isEmpty()) { showError(error); return; }
+        startHintScan();
+    });
+}
+
+void AppController::startHintScan() {
+    const quint64 invocation = m_hintInvocation;
     m_hintScanRetry.start(
-        [this] { return m_scanner.scan(m_kwin.snapshot()); },
+        [this, invocation](HintScanRetry::ProbeDone done) {
+            const int attempt = ++m_hintProbeNumber;
+            m_hintScanWorker.probe(m_kwin.snapshot(),
+                [invocation, attempt, timer = startedTimer(), done = std::move(done)](TargetScanner::ProbeResult result) {
+                    logHintScan(invocation, "probe", attempt, timer, result.metrics,
+                        result.matchedWindows, result.unmatchedWindows, 0, probeStatusName(result.status));
+                    done(std::move(result));
+                });
+        },
+        [this, invocation](HintScanRetry::Done done) {
+            m_hintScanWorker.scan(m_kwin.snapshot(),
+                [invocation, timer = startedTimer(), done = std::move(done)](TargetScanner::Result result) {
+                    logHintScan(invocation, "final-scan", 1, timer, result.metrics, result.matchedWindows,
+                        result.unmatchedWindows, result.targets.size(), result.error.isEmpty() ? "ok" : "failed");
+                    done(std::move(result));
+                });
+        },
         [this](TargetScanner::Result result) {
             if (!result.error.isEmpty()) { showError(result.error); return; }
+            m_hintLayout.reset();
             m_hints = std::move(result.targets);
             const int length = NavigationMath::hintCodeLength(m_hints.size());
             for (int i = 0; i < m_hints.size(); ++i)
                 m_hints[i].label = NavigationMath::hintLabel(i, length);
             m_prefix.clear();
             m_mode = Mode::Hints;
-            render();
+            render(hintPerformance().isDebugEnabled());
         },
-        [this, activeWindow, activeScreen, initialSnapshot, activeClient, activeFrame] {
-            const QJsonObject current = m_kwin.snapshot();
-            if (current.value(QStringLiteral("activeWindow")).toString() != activeWindow ||
-                current.value(QStringLiteral("activeScreen")).toString() != activeScreen ||
-                current.value(QStringLiteral("screens")) != initialSnapshot.value(QStringLiteral("screens")))
-                return false;
-            for (const auto &value : current.value(QStringLiteral("windows")).toArray()) {
-                const auto window = value.toObject();
-                if (window.value(QStringLiteral("id")).toString() == activeWindow)
-                    return window.value(QStringLiteral("client")) == activeClient &&
-                        window.value(QStringLiteral("frame")) == activeFrame;
-            }
-            return activeWindow.isEmpty() && activeClient.isUndefined() && activeFrame.isUndefined();
-        });
+        [this] { return isHintScanCurrent(); });
+}
+
+bool AppController::isHintScanCurrent() const {
+    return m_hintLayout && *m_hintLayout == hintLayout(m_kwin.snapshot());
+}
+
+void AppController::cancelHintScan() {
+    m_hintScanRetry.cancel();
+    m_hintScanWorker.cancel();
+    m_hintLayout.reset();
+    disconnect(m_hintFrameConnection);
+    m_hintFrameConnection = {};
 }
 
 void AppController::openGrid() {
@@ -164,7 +222,7 @@ void AppController::openGrid() {
 }
 
 void AppController::showError(const QString &error) {
-    m_hintScanRetry.cancel();
+    cancelHintScan();
     qWarning().noquote() << "Vimwhere:" << error;
     m_error = error;
     m_mode = Mode::Error;
@@ -172,7 +230,7 @@ void AppController::showError(const QString &error) {
 }
 
 void AppController::closeMode() {
-    m_hintScanRetry.cancel();
+    cancelHintScan();
     for (OverlayView *view : m_overlays) view->hide();
     m_mode = Mode::Idle;
     m_hints.clear();
@@ -214,7 +272,7 @@ bool AppController::hintStillValid(const HintTarget &target) const {
     return true;
 }
 
-void AppController::render() {
+void AppController::render(bool measureHintPresentation) {
     if (m_mode == Mode::Idle) return;
     ensureOverlays();
     if (m_overlays.isEmpty()) { qWarning() << "No overlay screen"; return; }
@@ -228,6 +286,17 @@ void AppController::render() {
     const QString active = m_kwin.snapshot().value(QStringLiteral("activeScreen")).toString();
     for (int i = 0; i < m_overlays.size(); ++i)
         if (m_overlays[i]->screen()->name() == active) focusIndex = i;
+    if (measureHintPresentation) {
+        const quint64 invocation = m_hintInvocation;
+        qCDebug(hintPerformance).nospace() << "hint=" << invocation << " phase=overlay-request elapsed_ms="
+            << m_hintOpenedAt.elapsed() << " targets=" << m_hints.size();
+        m_hintFrameConnection = connect(m_overlays[focusIndex], &QQuickWindow::frameSwapped, this,
+            [this, invocation] {
+                if (m_mode != Mode::Hints || invocation != m_hintInvocation) return;
+                qCDebug(hintPerformance).nospace() << "hint=" << invocation << " phase=first-frame elapsed_ms="
+                    << m_hintOpenedAt.elapsed() << " targets=" << m_hints.size();
+            }, Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+    }
     for (int i = 0; i < m_overlays.size(); ++i) {
         OverlayView *view = m_overlays[i];
         const QRectF screen = view->screen()->geometry();
