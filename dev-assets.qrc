@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/vimwhere">
+        <file>qml/Overlay.qml</file>
+        <file>kwin/main.js</file>
+    </qresource>
+</RCC>

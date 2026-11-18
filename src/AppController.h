@@ -19,6 +19,10 @@ class AppController : public QObject {
 public:
     explicit AppController(QObject *parent = nullptr);
     bool start();
+#ifdef VIMWHERE_LIVE_RELOAD
+signals:
+    void startupReady();
+#endif
 private:
     enum class Mode { Idle, Hints, Grid, Error };
     void openHints();

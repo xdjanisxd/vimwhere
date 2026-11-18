@@ -1,0 +1,56 @@
+#!/bin/bash
+set -euo pipefail
+
+state=$1
+unit=app-vimwhere@autostart.service
+current=$state/current/vimwhere
+previous=$state/previous/vimwhere
+pending=$state/pending
+rollback=$state/rollback
+
+exec 9>"$state/update.lock"
+flock 9
+
+restart_vimwhere() {
+    systemctl --user restart "$unit" && systemctl --user is-active --quiet "$unit"
+}
+
+restore_previous() {
+    if [[ $rollback -ef $current ]]; then
+        rm -- "$rollback"
+    else
+        mv -fT -- "$rollback" "$current"
+    fi
+}
+
+restore_interrupted_update() {
+    if [[ -f $rollback ]]; then
+        restore_previous
+        echo 'Restored the previous executable after an interrupted Vimwhere update.' >&2
+    fi
+}
+
+trap restore_interrupted_update EXIT
+trap 'exit 1' HUP INT TERM
+if [[ -f $rollback ]]; then
+    restore_interrupted_update
+    restart_vimwhere
+fi
+
+while [[ -f $pending ]]; do
+    ln -T -- "$current" "$rollback"
+    mv -fT -- "$pending" "$current"
+    if restart_vimwhere; then
+        mv -fT -- "$rollback" "$previous"
+        echo 'Vimwhere update is ready.'
+        continue
+    fi
+
+    echo 'Vimwhere update failed to become ready. Restoring the previous executable.' >&2
+    restore_previous
+    if ! restart_vimwhere; then
+        echo 'The previous Vimwhere executable was restored, but its service failed to start.' >&2
+        exit 1
+    fi
+    echo 'The previous Vimwhere version is ready.'
+done

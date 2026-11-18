@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+
+binary=$1
+state=$2
+temporary=$(mktemp "$state/.pending.XXXXXXXX")
+trap 'rm -f -- "$temporary"' EXIT
+
+install -m 755 -- "$binary" "$temporary"
+mv -fT -- "$temporary" "$state/pending"

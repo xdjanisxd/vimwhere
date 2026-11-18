@@ -25,6 +25,8 @@ This build and link completed successfully in the development workspace. If pkg-
 export PKG_CONFIG_PATH="/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 ```
 
+To restart the Plasma Wayland autostart after each successful development build, see [development live reload](docs/dev-reload.md).
+
 ## Use
 
 Run `./build/vimwhere` from the repository root in a native KDE Wayland session. The shortcuts default to `Ctrl+Alt+F` for hints and `Ctrl+Alt+G` for the grid. On first use, the selected shortcut starts the portal permission flow and does not select a target; grant access, then press the shortcut again. Hint mode schedules six AT-SPI scans with 80 ms event-loop intervals, giving accessibility trees about 400 ms to hydrate. It uses only the final scan's targets, so it never mixes coordinates from different snapshots. If access is denied, the app shows an error overlay. Both shortcuts can be configured through the QSettings keys `shortcuts/hints` and `shortcuts/grid` (defaults: `Ctrl+Alt+F` and `Ctrl+Alt+G`).

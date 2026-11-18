@@ -1,0 +1,159 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+build=$repo/build
+state=$build/.vimwhere-live
+config=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+desktop_unit=app-vimwhere@autostart.service
+session=plasma-workspace-wayland.target
+watch=vimwhere-dev-reload.path
+updater=vimwhere-dev-reload.service
+override=$config/$desktop_unit.d/50-vimwhere-dev-reload.conf
+owner="# Managed by Vimwhere development reload in $repo"
+files=("$override" "$config/$watch" "$config/$updater")
+
+quote_unit_path() {
+    local path=$1
+    path=${path//\\/\\\\}
+    path=${path//\"/\\\"}
+    path=${path//%/%%}
+    printf '"%s"' "$path"
+}
+
+write_unit() {
+    local temporary
+    temporary=$(mktemp "$(dirname -- "$1")/.vimwhere-unit.XXXXXXXX")
+    if ! { printf '%s\n' "$owner"; cat; } > "$temporary" || ! mv -T -- "$temporary" "$1"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+restart_desktop_app() {
+    systemctl --user restart "$desktop_unit" && systemctl --user is-active --quiet "$desktop_unit"
+}
+
+install_reload() {
+    local file
+    for file in "${files[@]}"; do
+        if [[ -e $file || -L $file ]]; then
+            echo "Vimwhere reload configuration already exists at $file" >&2
+            return 1
+        fi
+    done
+    if [[ ! -x $build/vimwhere || ! -x $state/pending && ! -x $state/current/vimwhere ]]; then
+        echo 'Build the ordinary and live-reload versions first. See docs/dev-reload.md.' >&2
+        return 1
+    fi
+    if ! systemctl --user is-active --quiet "$session" ||
+       ! systemctl --user is-active --quiet "$desktop_unit"; then
+        echo 'Run setup with the existing Vimwhere desktop autostart active in Plasma Wayland.' >&2
+        return 1
+    fi
+
+    migration_reloaded=false
+    migration_restarted=false
+    trap 'setup_failed "$?"' EXIT
+    trap 'exit 1' HUP INT TERM
+    mkdir -p -- "$state/current" "$state/previous" "$(dirname -- "$override")"
+    if [[ -f $state/pending ]]; then
+        mv -fT -- "$state/pending" "$state/current/vimwhere"
+    fi
+    write_unit "$override" <<EOF
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExitType=main
+NotifyAccess=main
+TimeoutStartSec=15s
+ExecStart=
+ExecStart=:$(quote_unit_path "$state/current/vimwhere")
+EOF
+    write_unit "$config/$watch" <<EOF
+[Unit]
+Description=Watch for Vimwhere development builds
+PartOf=$session
+
+[Path]
+PathExists=${state//%/%%}/pending
+
+[Install]
+WantedBy=$session
+EOF
+    write_unit "$config/$updater" <<EOF
+[Unit]
+Description=Apply a Vimwhere development build
+Requisite=$session
+After=$session
+PartOf=$session
+
+[Service]
+Type=oneshot
+ExecStart=:$(quote_unit_path "$repo/tools/apply-dev-build") $(quote_unit_path "$state")
+EOF
+    migration_reloaded=true
+    systemctl --user daemon-reload
+    if [[ $(systemctl --user show -p LoadState --value "$watch") != loaded ||
+          $(systemctl --user show -p LoadState --value "$updater") != loaded ]]; then
+        echo 'The Vimwhere watcher or updater could not be loaded.' >&2
+        return 1
+    fi
+    migration_restarted=true
+    restart_desktop_app
+    systemctl --user enable --now "$watch"
+    : > "$state/enabled"
+    trap - EXIT HUP INT TERM
+    echo 'Vimwhere development reload is active.'
+}
+
+setup_failed() {
+    local status=$1
+    if (( status == 0 )); then return; fi
+    set +e
+    echo 'Vimwhere reload setup failed. Restoring the desktop autostart.' >&2
+    if systemctl --user is-enabled --quiet "$watch"; then
+        systemctl --user disable --now "$watch"
+        systemctl --user stop "$updater"
+    fi
+    rm -f -- "${files[@]}" "$state/enabled"
+    if [[ $migration_reloaded == true ]]; then
+        systemctl --user daemon-reload
+    fi
+    if [[ $migration_restarted == true ]]; then
+        systemctl --user reset-failed "$desktop_unit"
+        if ! restart_desktop_app; then
+            echo 'The original desktop autostart configuration was restored, but the service failed to start.' >&2
+        fi
+    fi
+}
+
+remove_reload() {
+    local file
+    for file in "${files[@]}"; do
+        if [[ ! -f $file || $(head -n1 -- "$file") != "$owner" ]]; then
+            echo "Vimwhere reload configuration for this checkout was not found at $file" >&2
+            return 1
+        fi
+    done
+    if [[ ! -x $build/vimwhere ]]; then
+        echo 'Restore the ordinary build at build/vimwhere before removing reload.' >&2
+        return 1
+    fi
+    systemctl --user disable --now "$watch"
+    systemctl --user stop "$updater"
+    rm -f -- "${files[@]}" "$state/enabled"
+    systemctl --user daemon-reload
+    if systemctl --user is-active --quiet "$session"; then
+        restart_desktop_app
+    fi
+    echo 'Vimwhere desktop autostart restored.'
+}
+
+case ${1:-} in
+    install) install_reload ;;
+    remove) remove_reload ;;
+    *) echo "Usage: $0 install|remove" >&2; exit 2 ;;
+esac

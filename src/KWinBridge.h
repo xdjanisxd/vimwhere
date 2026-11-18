@@ -32,5 +32,7 @@ private:
     QString m_error;
     bool m_ready = false;
     bool m_loaded = false;
+#ifndef VIMWHERE_LIVE_RELOAD
     std::unique_ptr<QTemporaryFile> m_scriptFile;
+#endif
 };

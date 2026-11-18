@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonParseError>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 
@@ -38,9 +39,13 @@ bool KWinBridge::start() {
         m_error = QStringLiteral("Cannot export KWin bridge: %1").arg(bus.lastError().message());
         return false;
     }
+#ifdef VIMWHERE_LIVE_RELOAD
+    const QString path = QStringLiteral(":/vimwhere/kwin/main.js");
+#else
     QString path = QStandardPaths::locate(QStandardPaths::GenericDataLocation,
         QStringLiteral("vimwhere/kwin/main.js"));
     if (path.isEmpty()) path = QStringLiteral(VIMWHERE_SOURCE_DIR "/kwin/main.js");
+#endif
     if (!QFileInfo::exists(path)) {
         m_error = QStringLiteral("KWin script was not found: %1").arg(path);
         return false;
@@ -59,14 +64,30 @@ bool KWinBridge::start() {
     }
     QByteArray scriptText = source.readAll();
     scriptText.replace("__VIMWHERE_BUS_NAME__", bus.baseService().toUtf8());
+#ifdef VIMWHERE_LIVE_RELOAD
+    // Use one session-local path even when systemd stops the process without running destructors.
+    const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (runtime.isEmpty()) {
+        m_error = QStringLiteral("Cannot find session runtime storage for the KWin script");
+        return false;
+    }
+    const QString scriptPath = runtime + QStringLiteral("/vimwhere-runtime.js");
+    QSaveFile scriptFile(scriptPath);
+    if (!scriptFile.open(QIODevice::WriteOnly) || scriptFile.write(scriptText) != scriptText.size() || !scriptFile.commit()) {
+        m_error = QStringLiteral("Cannot stage KWin script in session runtime storage: %1").arg(scriptFile.errorString());
+        return false;
+    }
+#else
     m_scriptFile = std::make_unique<QTemporaryFile>(QDir::tempPath() + QStringLiteral("/vimwhere-XXXXXX.js"));
     if (!m_scriptFile->open() || m_scriptFile->write(scriptText) != scriptText.size() || !m_scriptFile->flush()) {
         m_error = QStringLiteral("Cannot stage KWin script in temporary storage");
         return false;
     }
+    const QString scriptPath = m_scriptFile->fileName();
+#endif
     // A previous process may have crashed without unloading its runtime script.
     scripting.call(QStringLiteral("unloadScript"), QStringLiteral("vimwhere-runtime"));
-    QDBusReply<int> loaded = scripting.call(QStringLiteral("loadScript"), m_scriptFile->fileName(),
+    QDBusReply<int> loaded = scripting.call(QStringLiteral("loadScript"), scriptPath,
         QStringLiteral("vimwhere-runtime"));
     if (!loaded.isValid() || loaded.value() < 0) {
         m_error = QStringLiteral("KWin refused script: %1").arg(loaded.error().message());

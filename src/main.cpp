@@ -6,6 +6,10 @@
 #include <QScreen>
 #include <QTextStream>
 #include <atspi/atspi.h>
+#ifdef VIMWHERE_LIVE_RELOAD
+#include <QDebug>
+#include <systemd/sd-daemon.h>
+#endif
 
 static int diagnose() {
     QTextStream out(stdout);
@@ -43,6 +47,12 @@ int main(int argc, char *argv[]) {
     }
     app.setQuitOnLastWindowClosed(false);
     AppController controller;
+#ifdef VIMWHERE_LIVE_RELOAD
+    QObject::connect(&controller, &AppController::startupReady, &app, [] {
+        const int notified = sd_notify(1, "READY=1\nSTATUS=Shortcuts registered and KWin snapshot received");
+        if (notified < 0) qWarning() << "Could not send systemd readiness notification:" << notified;
+    });
+#endif
     if (!controller.start()) return 1;
     return app.exec();
 }

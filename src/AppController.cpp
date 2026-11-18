@@ -52,12 +52,24 @@ bool AppController::start() {
     m_hintAction->setObjectName(QStringLiteral("show-hints"));
     m_gridAction = new QAction(QStringLiteral("Show Vimwhere grid"), this);
     m_gridAction->setObjectName(QStringLiteral("show-grid"));
-    KGlobalAccel::setGlobalShortcut(m_hintAction, {hintKey});
-    KGlobalAccel::setGlobalShortcut(m_gridAction, {gridKey});
+    const bool hintsRegistered = KGlobalAccel::setGlobalShortcut(m_hintAction, {hintKey});
+    const bool gridRegistered = KGlobalAccel::setGlobalShortcut(m_gridAction, {gridKey});
     connect(m_hintAction, &QAction::triggered, this, &AppController::openHints);
     connect(m_gridAction, &QAction::triggered, this, &AppController::openGrid);
     qInfo() << "Vimwhere running; hints:" << KGlobalAccel::self()->shortcut(m_hintAction)
             << "grid:" << KGlobalAccel::self()->shortcut(m_gridAction);
+    if (!hintsRegistered || !gridRegistered) {
+        qWarning() << "Could not register both Vimwhere shortcuts";
+#ifdef VIMWHERE_LIVE_RELOAD
+        return false;
+#endif
+    }
+#ifdef VIMWHERE_LIVE_RELOAD
+    if (m_kwin.isReady()) emit startupReady();
+    else connect(&m_kwin, &KWinBridge::readyChanged, this, [this](bool ready) {
+        if (ready) emit startupReady();
+    }, Qt::SingleShotConnection);
+#endif
     return true;
 }
 

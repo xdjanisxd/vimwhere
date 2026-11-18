@@ -21,10 +21,14 @@ OverlayView::OverlayView(QScreen *screen) : QQuickView() {
                       LayerShellQt::Window::AnchorLeft | LayerShellQt::Window::AnchorRight);
     shell->setExclusiveZone(-1);
     shell->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityNone);
+#ifdef VIMWHERE_LIVE_RELOAD
+    setSource(QUrl(QStringLiteral("qrc:/vimwhere/qml/Overlay.qml")));
+#else
     QString path = QStandardPaths::locate(QStandardPaths::GenericDataLocation,
         QStringLiteral("vimwhere/qml/Overlay.qml"));
     if (path.isEmpty()) path = QStringLiteral(VIMWHERE_SOURCE_DIR "/qml/Overlay.qml");
     setSource(QUrl::fromLocalFile(path));
+#endif
     // QQuickView can reset its screen while loading the QML source.
     setScreen(screen);
     // Keep the layer-shell output binding explicit after QQuickView loaded QML.
