@@ -1,4 +1,4 @@
-QT += core gui quick qml dbus
+QT += core gui widgets quick qml dbus
 CONFIG += c++20 link_pkgconfig
 PKGCONFIG += atspi-2 glib-2.0 gobject-2.0
 TEMPLATE = app

@@ -3,7 +3,8 @@
 #include "NavigationMath.h"
 
 #include <QAction>
-#include <QGuiApplication>
+#include <QApplication>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QKeySequence>
@@ -11,6 +12,7 @@
 #include <QQuickItem>
 #include <QScreen>
 #include <QSettings>
+#include <QStyle>
 #include <QTimer>
 #include <QVariantMap>
 #include <QDebug>
@@ -100,9 +102,9 @@ bool AppController::start() {
         QStringLiteral("Ctrl+Alt+F")).toString());
     const QKeySequence gridKey(settings.value(QStringLiteral("shortcuts/grid"),
         QStringLiteral("Ctrl+Alt+G")).toString());
-    m_hintAction = new QAction(QStringLiteral("Show Vimwhere hints"), this);
+    m_hintAction = new QAction(QStringLiteral("İpuçlarını göster"), this);
     m_hintAction->setObjectName(QStringLiteral("show-hints"));
-    m_gridAction = new QAction(QStringLiteral("Show Vimwhere grid"), this);
+    m_gridAction = new QAction(QStringLiteral("Grid’i aç"), this);
     m_gridAction->setObjectName(QStringLiteral("show-grid"));
     const bool hintsRegistered = KGlobalAccel::setGlobalShortcut(m_hintAction, {hintKey});
     const bool gridRegistered = KGlobalAccel::setGlobalShortcut(m_gridAction, {gridKey});
@@ -116,6 +118,7 @@ bool AppController::start() {
         return false;
 #endif
     }
+    setupTray();
 #ifdef VIMWHERE_LIVE_RELOAD
     if (m_kwin.isReady()) emit startupReady();
     else connect(&m_kwin, &KWinBridge::readyChanged, this, [this](bool ready) {
@@ -123,6 +126,18 @@ bool AppController::start() {
     }, Qt::SingleShotConnection);
 #endif
     return true;
+}
+
+void AppController::setupTray() {
+    m_trayMenu.addAction(m_hintAction);
+    m_trayMenu.addAction(m_gridAction);
+    m_trayMenu.addSeparator();
+    m_trayMenu.addAction(QStringLiteral("Çıkış"), qApp, &QCoreApplication::quit);
+    m_trayIcon.setIcon(QIcon::fromTheme(QStringLiteral("preferences-desktop-accessibility"),
+        QApplication::style()->standardIcon(QStyle::SP_ComputerIcon)));
+    m_trayIcon.setToolTip(QStringLiteral("Vimwhere"));
+    m_trayIcon.setContextMenu(&m_trayMenu);
+    m_trayIcon.show();
 }
 
 void AppController::ensureOverlays() {
@@ -150,7 +165,7 @@ void AppController::openHints() {
     closeMode();
     if (!m_portal.isReady()) {
         m_portal.prepare();
-        qInfo() << "Complete the portal permission dialog, then press the hint shortcut again";
+        qInfo() << "Complete the portal permission dialog, then invoke hints again";
         return;
     }
     if (!m_kwin.isReady()) {
@@ -221,7 +236,7 @@ void AppController::openGrid() {
     closeMode();
     if (!m_portal.isReady()) {
         m_portal.prepare();
-        qInfo() << "Complete the portal permission dialog, then press the grid shortcut again";
+        qInfo() << "Complete the portal permission dialog, then open the grid again";
         return;
     }
     m_screenLayout = screenLayout();

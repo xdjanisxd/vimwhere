@@ -1,9 +1,9 @@
 #include "AppController.h"
 #include "HintScanChild.h"
 
+#include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
-#include <QGuiApplication>
 #include <QScreen>
 #include <QTextStream>
 #include <atspi/atspi.h>
@@ -40,9 +40,10 @@ static int diagnose() {
 
 int main(int argc, char *argv[]) {
     if (argc == 2 && std::strcmp(argv[1], "--hint-worker") == 0) return runHintScanChild(argc, argv);
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Vimwhere"));
     QCoreApplication::setApplicationName(QStringLiteral("vimwhere"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("vimwhere"));
     if (app.arguments().contains(QStringLiteral("--diagnose"))) return diagnose();
     if (app.arguments().contains(QStringLiteral("--help"))) {
         QTextStream(stdout) << "vimwhere [--diagnose]\nCtrl+Alt+F: hints; Ctrl+Alt+G: grid\n";

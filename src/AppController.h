@@ -7,10 +7,12 @@
 #include "PortalClicker.h"
 
 #include <QElapsedTimer>
+#include <QMenu>
 #include <QObject>
 #include <QPointer>
 #include <QRectF>
 #include <QRect>
+#include <QSystemTrayIcon>
 #include <QVector>
 #include <optional>
 
@@ -28,6 +30,7 @@ signals:
 #endif
 private:
     enum class Mode { Idle, Hints, Grid, Error };
+    void setupTray();
     void openHints();
     void startHintScan();
     void cancelHintScan();
@@ -65,4 +68,6 @@ private:
     int m_hintProbeNumber = 0;
     QAction *m_hintAction = nullptr;
     QAction *m_gridAction = nullptr;
+    QMenu m_trayMenu;
+    QSystemTrayIcon m_trayIcon;
 };

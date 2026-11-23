@@ -1,0 +1,106 @@
+#!/bin/bash
+set -euo pipefail
+
+if (( $# > 1 )); then
+    printf 'Usage: %s [install|remove]\n' "$0" >&2
+    exit 2
+fi
+if [[ ${HOME:-} != /* ]]; then
+    printf 'The home directory must be an absolute path.\n' >&2
+    exit 1
+fi
+
+repo=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+build=$repo/build/user-install
+data=${XDG_DATA_HOME:-}
+config=${XDG_CONFIG_HOME:-}
+[[ $data == /* ]] || data=$HOME/.local/share
+[[ $config == /* ]] || config=$HOME/.config
+binary=$HOME/.local/bin/vimwhere
+launcher=$data/applications/vimwhere.desktop
+autostart=$config/autostart/vimwhere.desktop
+overlay=$data/vimwhere/qml/Overlay.qml
+script=$data/vimwhere/kwin/main.js
+
+desktop_string() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '%s' "$value"
+}
+
+desktop_entry() {
+    local executable=$binary
+    executable=${executable//\\/\\\\}
+    executable=${executable//\"/\\\"}
+    executable=${executable//\$/\\\$}
+    executable=${executable//\`/\\\`}
+    executable=${executable//%/%%}
+    cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=Vimwhere
+Comment=Navigate the desktop with the keyboard
+Icon=preferences-desktop-accessibility
+Exec="$(desktop_string "$executable")"
+TryExec=$(desktop_string "$binary")
+Terminal=false
+EOF
+    printf '%s\n' "$1"
+}
+
+install_file() (
+    local mode=$1 source=$2 destination=$3 directory temporary
+    directory=$(dirname -- "$destination")
+    mkdir -p -- "$directory"
+    temporary=$(mktemp "$directory/.vimwhere.XXXXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT
+    install -m "$mode" -- "$source" "$temporary"
+    mv -fT -- "$temporary" "$destination"
+)
+
+install_vimwhere() {
+    if [[ $binary == *=* ]]; then
+        printf 'Desktop launchers require a home directory path without an equals sign.\n' >&2
+        return 1
+    fi
+
+    mkdir -p -- "$build"
+    exec 9<"$build"
+    flock 9
+    cmake -S "$repo" -B "$build" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$build" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+
+    desktop_entry 'Categories=Utility;Accessibility;' > "$build/launcher.desktop"
+    local write_autostart=false
+    # An existing install can disable autostart by hiding or removing its entry.
+    if [[ -f $autostart || ! -f $launcher || ! -x $binary ]]; then
+        desktop_entry 'OnlyShowIn=KDE;' > "$build/autostart.desktop"
+        if [[ -f $autostart ]] && grep -Eq '^[[:space:]]*Hidden[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$autostart"; then
+            printf 'Hidden=true\n' >> "$build/autostart.desktop"
+        fi
+        write_autostart=true
+    fi
+    install_file 644 "$repo/qml/Overlay.qml" "$overlay"
+    install_file 644 "$repo/kwin/main.js" "$script"
+    install_file 755 "$build/vimwhere" "$binary"
+    if [[ $write_autostart == true ]]; then
+        install_file 644 "$build/autostart.desktop" "$autostart"
+    fi
+    install_file 644 "$build/launcher.desktop" "$launcher"
+    printf 'Installed Vimwhere to %s. Open Vimwhere from the Plasma application menu.\n' "$binary"
+}
+
+remove_vimwhere() {
+    rm -f -- "$autostart" "$launcher" "$binary" "$overlay" "$script"
+    rmdir -- "$(dirname -- "$overlay")" "$(dirname -- "$script")" "$data/vimwhere" 2>/dev/null || true
+    printf 'Removed the Vimwhere launcher, autostart, executable, and runtime files.\n'
+}
+
+case ${1:-install} in
+    install) install_vimwhere ;;
+    remove) remove_vimwhere ;;
+    *) printf 'Usage: %s [install|remove]\n' "$0" >&2; exit 2 ;;
+esac

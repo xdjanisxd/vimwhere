@@ -4,7 +4,7 @@ Opt in on Plasma Wayland to have `make -C build -j2` replace the running Vimwher
 
 ## Set up
 
-Start with the ordinary `build/vimwhere` executable and an active desktop autostart. The desktop entry at `~/.config/autostart/vimwhere.desktop` should point `Exec` and `TryExec` at the absolute path to `build/vimwhere`. Set `Terminal=false` and `OnlyShowIn=KDE;`. Confirm KDE has started `app-vimwhere@autostart.service` before running setup.
+Start with the ordinary `build/vimwhere` executable and an active desktop autostart. The [user installer](../README.md#install-for-your-user) creates the autostart entry for the installed executable. Confirm KDE has started `app-vimwhere@autostart.service` before running setup.
 
 From the repository root:
 
