@@ -154,6 +154,7 @@ int main(int argc, char **argv) {
     }
     FakePortal portal;
     portal.unpositioned = app.arguments().contains(QStringLiteral("--unpositioned"));
+    const bool restartPortal = app.arguments().contains(QStringLiteral("--restart-portal"));
     RemoteDesktop remote(&portal);
     ScreenCast screen(&portal);
     if (!bus.registerObject(QStringLiteral("/org/freedesktop/portal/desktop"), &portal,
@@ -162,12 +163,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     PortalClicker clicker;
-    bool ready = false;
+    int readyCount = 0;
+    bool lostPortal = false;
     QString error;
     QObject::connect(&clicker, &PortalClicker::readyChanged, &app, [&](bool value) {
         if (value) {
-            ready = true;
-            if (portal.unpositioned)
+            ++readyCount;
+            if (restartPortal && readyCount == 1) {
+                QTimer::singleShot(0, &app, [&] {
+                    if (!bus.unregisterService(QStringLiteral("org.freedesktop.portal.Desktop"))) {
+                        error = QStringLiteral("could not stop test portal");
+                        app.quit();
+                    }
+                });
+            } else if (portal.unpositioned)
                 clicker.clickGlobal(QPointF(120, 80), [&] { return std::optional<QPointF>(portal.pointer); });
             else app.quit();
         }
@@ -178,20 +187,30 @@ int main(int argc, char **argv) {
         app.quit();
     });
     QObject::connect(&clicker, &PortalClicker::sessionFailed, &app, [&](const QString &value) {
+        if (restartPortal && readyCount == 1 && !lostPortal && !clicker.isReady()) {
+            lostPortal = true;
+            if (bus.registerService(QStringLiteral("org.freedesktop.portal.Desktop"))) {
+                clicker.prepare();
+                return;
+            }
+        }
         error = value; app.quit();
     });
     QTimer::singleShot(5000, &app, [&] { error = QStringLiteral("timed out"); app.quit(); });
     clicker.prepare();
     app.exec();
-    if (!error.isEmpty() || !ready || !clicker.isReady() || portal.selectDevicesCalls != 1 ||
-        portal.selectSourcesCalls != 1 || portal.startCalls != 1 ||
+    const int expectedSessions = restartPortal ? 2 : 1;
+    if (!error.isEmpty() || readyCount != expectedSessions || !clicker.isReady() ||
+        lostPortal != restartPortal || portal.selectDevicesCalls != expectedSessions ||
+        portal.selectSourcesCalls != expectedSessions || portal.startCalls != expectedSessions ||
         (portal.unpositioned && (portal.motionCalls != 1 || portal.buttonCalls != 2 ||
                                  portal.pointer != QPointF(120, 80)))) {
-        qCritical() << "Portal string session regression failed:" << error
-                    << portal.selectDevicesCalls << portal.selectSourcesCalls << portal.startCalls;
+        qCritical() << "Portal session regression failed:" << error
+                    << "ready sessions:" << readyCount << "lost portal:" << lostPortal
+                    << "setup calls:" << portal.selectDevicesCalls << portal.selectSourcesCalls << portal.startCalls;
         return 1;
     }
-    qInfo() << "portal string session regression passed";
+    qInfo() << "portal session regression passed";
     return 0;
 }
 

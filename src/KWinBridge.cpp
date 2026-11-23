@@ -1,6 +1,7 @@
 #include "KWinBridge.h"
 
 #include <QDBusConnection>
+#include <QCoreApplication>
 #include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDBusReply>
@@ -64,6 +65,7 @@ bool KWinBridge::start() {
     }
     QByteArray scriptText = source.readAll();
     scriptText.replace("__VIMWHERE_BUS_NAME__", bus.baseService().toUtf8());
+    scriptText.replace("__VIMWHERE_PID__", QByteArray::number(QCoreApplication::applicationPid()));
 #ifdef VIMWHERE_LIVE_RELOAD
     // Use one session-local path even when systemd stops the process without running destructors.
     const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);

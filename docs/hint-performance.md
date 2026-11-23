@@ -7,7 +7,8 @@
 ## Uygulanan yöntem
 
 - Erişilebilirlik hazırlığı, yoklamalar ve tam tarama aynı yardımcı süreçte çalışır. Yardımcı süreç boşta yeniden kullanılır. Libatspi bazı D-Bus bağlantılarını sürecin varsayılan GLib bağlamına bağladığı için süreç ayrımı, bu bağlantıları ve bekleyen çağrıları arayüzden yalıtır.
-- Erişilebilirlik hazırlığından sonra 0, 80, 160, 240 ve 320 ms civarında beş sığ yoklama planlanır. Yoklamalar eşleşen pencerelerin erişilebilirlik ağaçlarını etkinleştirir ve köklerin yakınındaki öğeleri kontrol eder. Yaklaşık 400 ms sonra güncel KWin pencereleriyle tek tam tarama başlar. Kökler erken görünse bile geç yüklenen Chromium ve Electron öğeleri için bu süre korunur. İpuçları yalnızca son taramadan üretilir.
+- Erişilebilirlik hazırlığından sonra 0, 80, 160, 240 ve 320 ms civarında en fazla beş sığ yoklama planlanır. Bir sağlayıcı yavaş yanıt verdiğinde süresi geçmiş yoklamalar atlanır. Yoklamalar eşleşen pencerelerin erişilebilirlik ağaçlarını etkinleştirir ve köklerin yakınındaki öğeleri kontrol eder. Yaklaşık 400 ms sonra güncel KWin pencereleriyle tek tam tarama başlar. Kökler erken görünse bile geç yüklenen Chromium ve Electron öğeleri için bu süre korunur. İpuçları yalnızca son taramadan üretilir.
+- Başarılı taramadan sonraki 10 saniye içinde pencere düzeni ve odak aynıysa tam tarama hemen başlar. Önceki taramadan yalnızca pencere başına hedef sayısı tutulur. Tarama başarısız olursa veya herhangi bir pencerede hedef sayısı düşerse normal hazırlık ve tam tarama tekrarlanır. Her durumda gösterilen hedeflerin koordinatları son taramadan gelir.
 - Yeni bir ipucu isteği, grid moduna geçiş veya KWin odak, pencere ya da ekran düzeni değişikliği bekleyen isteği iptal eder. Fare imlecinin tek başına hareket etmesi iptal nedeni sayılmaz. Sonuç gösterilmeden önce düzen tekrar doğrulanır ve tıklama öncesi hedefin geçerliliği yeniden kontrol edilir.
 
 ## Ölçüm ve doğrulama

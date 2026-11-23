@@ -24,6 +24,9 @@ function sendSnapshot() {
     for (let i = 0; i < stack.length; ++i) {
         const w = stack[i];
         if (!w || !isOnVisibleDesktop(w)) continue;
+        // Vimwhere owns only overlay windows. KWin may expose these full-screen
+        // layer surfaces with an empty caption even when QWindow has a title.
+        if (Number(w.pid) === __VIMWHERE_PID__) continue;
         windows.push({
             id: String(w.internalId), pid: Number(w.pid), title: String(w.caption),
             frame: rect(w.frameGeometry), client: rect(w.clientGeometry),
@@ -56,6 +59,12 @@ function watchWindow(w) {
     connectIfAvailable(w.windowShown, sendSnapshot);
     connectIfAvailable(w.windowHidden, sendSnapshot);
     connectIfAvailable(w.minimizedChanged, sendSnapshot);
+    connectIfAvailable(w.captionChanged, sendSnapshot);
+    connectIfAvailable(w.desktopsChanged, sendSnapshot);
+    connectIfAvailable(w.activitiesChanged, sendSnapshot);
+    connectIfAvailable(w.outputChanged, sendSnapshot);
+    connectIfAvailable(w.hiddenChanged, sendSnapshot);
+    connectIfAvailable(w.opacityChanged, sendSnapshot);
 }
 for (const w of workspace.stackingOrder) watchWindow(w);
 connectIfAvailable(workspace.windowAdded, function(w) { watchWindow(w); sendSnapshot(); });

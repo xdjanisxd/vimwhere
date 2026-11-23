@@ -77,14 +77,63 @@ void testHydrationAndFinalSnapshot() {
     }, [] { return true; });
     runLoop(loop);
 
-    check(probeTimes.size() == 5 && finalScans == 1,
-          "Use five shallow probes and one final full collection even when a probe is ready");
+    check(!probeTimes.isEmpty() && probeTimes.size() <= 5 && finalScans == 1,
+          "Allow up to five shallow probes and one final full collection even when a probe is ready");
     for (int i = 1; i < probeTimes.size(); ++i)
         check(probeTimes[i] >= i * 80 - 5,
               "The probes must respect their 80 ms schedule");
     check(finalTime >= 395,
           "Preserve the roughly 400 ms hydration window before collecting targets");
     check(!retry.isActive(), "The retry scheduler must finish after publishing the result");
+}
+
+void testSlowProbe() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    int probes = 0;
+    retry.start([&](HintScanRetry::ProbeDone done) {
+        ++probes;
+        QTimer::singleShot(420, &loop, [done = std::move(done)] {
+            done(probeResult(ProbeStatus::NeedsHydration));
+        });
+    }, [](HintScanRetry::Done done) {
+        done(resultForTarget(1));
+    }, [&](TargetScanner::Result) { loop.quit(); }, [] { return true; });
+    runLoop(loop);
+    check(probes == 1, "Collect immediately after a probe consumes the hydration window");
+}
+
+void testRepeatedLayout() {
+    HintScanRetry retry;
+    QEventLoop loop;
+    int probes = 0, scans = 0;
+    auto invoke = [&](int layout, bool firstScanMissing) {
+        probes = scans = 0;
+        retry.start([&](HintScanRetry::ProbeDone done) {
+            ++probes;
+            done(probeResult(ProbeStatus::Ready));
+        }, [&](HintScanRetry::Done done) {
+            ++scans;
+            auto result = resultForTarget(layout * 10 + scans);
+            result.targets.first().windowId = firstScanMissing && scans == 1
+                ? QStringLiteral("other") : QStringLiteral("main");
+            done(std::move(result));
+        }, [&](TargetScanner::Result result) {
+            check(result.targets.first().windowId == QStringLiteral("main") &&
+                  result.targets.first().globalPoint.x() == layout * 10 + scans,
+                  "Show only targets from the latest complete scan");
+            loop.quit();
+        }, [] { return true; }, {{QStringLiteral("layout"), layout}});
+        runLoop(loop);
+    };
+    invoke(1, false);
+    check(probes > 0 && scans == 1, "Hydrate a new layout");
+    invoke(1, false);
+    check(probes == 0 && scans == 1, "Repeated layout should scan immediately");
+    invoke(1, true);
+    check(probes > 0 && scans == 2, "Recover a previously visible window after a partial warm scan");
+    invoke(2, false);
+    check(probes > 0 && scans == 1, "Hydrate on window or focus changes");
 }
 
 void testDisappearingTarget() {
@@ -109,7 +158,7 @@ void testDisappearingTarget() {
         loop.quit();
     }, [] { return true; });
     runLoop(loop);
-    check(probes == 5 && finalScans == 1, "Hydration expiry still collects exactly one snapshot");
+    check(probes > 0 && probes <= 5 && finalScans == 1, "Hydration expiry still collects exactly one snapshot");
 }
 
 void testFailedProbe() {
@@ -131,7 +180,7 @@ void testFailedProbe() {
         loop.quit();
     }, [] { return true; });
     runLoop(loop);
-    check(probes == 5 && finalScans == 1, "Continue through a transient early probe failure");
+    check(probes > 0 && probes <= 5 && finalScans == 1, "Continue through a transient early probe failure");
 }
 
 void testStaleFocusAndCallback() {
@@ -177,7 +226,7 @@ void testStaleFocusAndCallback() {
     }, [] { return true; });
     staleResult(resultForTarget(1));
     runLoop(loop);
-    check(newProbes == 5, "A queued stale callback must not interrupt the new generation");
+    check(newProbes > 0 && newProbes <= 5, "A queued stale callback must not interrupt the new generation");
 }
 
 void writeMarker(const QString &path) {
@@ -361,6 +410,8 @@ int main(int argc, char **argv) {
         return fakeHelper(arguments[2], arguments[3]);
 
     testHydrationAndFinalSnapshot();
+    testSlowProbe();
+    testRepeatedLayout();
     testDisappearingTarget();
     testFailedProbe();
     testStaleFocusAndCallback();

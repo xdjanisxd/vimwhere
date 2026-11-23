@@ -1,80 +1,52 @@
 import QtQuick
 
-Rectangle {
+Item {
     id: root
-    color: "#36091420"
-    property string mode: ""
     property string prompt: ""
     property var hintItems: []
     property var gridItems: []
 
-    Rectangle {
-        x: 16; y: 16
-        width: Math.min(root.width - 32, promptText.implicitWidth + 28)
-        height: 38
-        radius: 7
-        color: "#ec172332"
-        border.color: "#a1c8f4"
-        Text {
-            id: promptText
-            anchors.centerIn: parent
-            text: root.prompt
-            color: "white"
-            font.pixelSize: 16
-            font.bold: true
-        }
+    component OutlinedText: Text {
+        color: "white"
+        style: Text.Outline
+        styleColor: "#141922"
+        font.bold: true
+        textFormat: Text.PlainText
+        padding: 2
+    }
+
+    OutlinedText {
+        x: 16
+        y: 16
+        width: Math.max(0, root.width - 32)
+        visible: text.length > 0
+        z: 1
+        text: root.prompt
+        horizontalAlignment: Text.AlignLeft
+        wrapMode: Text.Wrap
+        font.pixelSize: 18
     }
 
     Repeater {
         model: root.hintItems
-        delegate: Rectangle {
-            id: hintBubble
+        delegate: OutlinedText {
             required property var modelData
-            x: modelData.x - width / 2
-            y: modelData.y - height / 2
-            width: hintText.implicitWidth + 12
-            height: 25
-            radius: 5
-            color: "#f9d976"
-            border.color: "#1e2530"
-            border.width: 2
-            Text {
-                id: hintText
-                anchors.centerIn: parent
-                text: hintBubble.modelData.label
-                color: "#171b25"
-                font.pixelSize: 15
-                font.bold: true
-            }
+            x: Math.max(0, Math.min(modelData.x - width / 2, root.width - width))
+            y: Math.max(0, Math.min(modelData.y - height / 2, root.height - height))
+            text: modelData.label
+            color: "#ffe57d"
+            font.pixelSize: 16
         }
     }
 
     Repeater {
         model: root.gridItems
-        delegate: Item {
-            id: gridCell
+        delegate: OutlinedText {
             required property var modelData
-            x: modelData.x; y: modelData.y
-            width: modelData.width; height: modelData.height
-            Rectangle {
-                anchors.fill: parent
-                color: "transparent"
-                border.color: "#a4e6fc"
-                border.width: 2
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 32; height: 32; radius: 16
-                color: "#de172332"
-                border.color: "white"
-                Text {
-                    anchors.centerIn: parent
-                    text: gridCell.modelData.label
-                    color: "white"
-                    font.pixelSize: 19
-                    font.bold: true
-                }
-            }
+            x: modelData.x + (modelData.width - width) / 2
+            y: modelData.y + (modelData.height - height) / 2
+            text: modelData.label
+            font.pixelSize: 26
         }
     }
 }

@@ -61,6 +61,7 @@ private:
     QElapsedTimer m_hintOpenedAt;
     QMetaObject::Connection m_hintFrameConnection;
     quint64 m_hintInvocation = 0;
+    int m_hintScanNumber = 0;
     int m_hintProbeNumber = 0;
     QAction *m_hintAction = nullptr;
     QAction *m_gridAction = nullptr;

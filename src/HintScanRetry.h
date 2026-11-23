@@ -3,6 +3,7 @@
 #include "TargetScanner.h"
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QObject>
 #include <QTimer>
 #include <functional>
@@ -16,7 +17,8 @@ public:
     using IsCurrent = std::function<bool()>;
 
     explicit HintScanRetry(QObject *parent = nullptr);
-    void start(Probe probe, Scan scan, Done completion, IsCurrent isCurrent);
+    void start(Probe probe, Scan scan, Done completion, IsCurrent isCurrent,
+               QJsonObject layout = {});
     void cancel();
     bool isActive() const { return m_active; }
 
@@ -32,6 +34,11 @@ private:
     Done m_completion;
     IsCurrent m_isCurrent;
     quint64 m_generation = 0;
-    int m_probes = 0;
+    bool m_startedHydration = false;
+    QJsonObject m_layout;
+    QJsonObject m_previousLayout;
+    QElapsedTimer m_lastSuccess;
+    QHash<QString, int> m_previousCounts;
+    bool m_tryImmediateScan = false;
     bool m_active = false;
 };

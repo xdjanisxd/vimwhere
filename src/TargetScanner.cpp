@@ -7,6 +7,7 @@
 #include <QSet>
 #include <atspi/atspi.h>
 #include <memory>
+#include <vector>
 
 namespace {
 constexpr int MaximumApplications = 200;
@@ -29,6 +30,7 @@ enum class Pass { Probe, Scan };
 struct ScanRun {
     TargetScanner::Result result;
     bool needsHydration = false;
+    int coveredWindows = 0;
     qint64 activationNs = 0;
     qint64 traversalNs = 0;
 };
@@ -117,18 +119,28 @@ GObjectPtr<AtspiAccessible> childAt(AtspiAccessible *parent, int index) {
     return {};
 }
 
-bool activateAccessibleTree(AtspiAccessible *top) {
+void clearRootCache(AtspiAccessible *root) {
+#if ATSPI_MAJOR_VERSION > 2 || (ATSPI_MAJOR_VERSION == 2 && ATSPI_MINOR_VERSION >= 52)
+    atspi_accessible_clear_cache_single(root);
+#else
+    atspi_accessible_clear_cache(root);
+#endif
+}
+
+bool activateAccessibleTree(AtspiAccessible *top, Pass pass) {
     // Chromium/Electron may expose a frame with a null child until an AT
     // client requests extended properties. Reading names/roles alone does
     // not activate their accessibility tree.
-    atspi_accessible_clear_cache(top);
+    clearRootCache(top);
     GError *error = nullptr;
     GHashTable *attributes = atspi_accessible_get_attributes(top, &error);
     const bool succeeded = attributes && !error;
     if (attributes) g_hash_table_unref(attributes);
     g_clear_error(&error);
-    // Discard the placeholder child cached before activation.
-    atspi_accessible_clear_cache(top);
+    // Drop the root's placeholder child. The full scan refreshes descendant
+    // states and child lists as well.
+    if (pass == Pass::Scan) atspi_accessible_clear_cache(top);
+    else clearRootCache(top);
     return succeeded;
 }
 
@@ -147,13 +159,6 @@ bool probeChildren(AtspiAccessible *top) {
         !atspi_state_set_contains(states.get(), ATSPI_STATE_DEFUNCT);
 }
 
-bool visible(AtspiAccessible *accessible) {
-    const GObjectPtr<AtspiStateSet> states(atspi_accessible_get_state_set(accessible));
-    return states && atspi_state_set_contains(states.get(), ATSPI_STATE_VISIBLE) &&
-        atspi_state_set_contains(states.get(), ATSPI_STATE_SHOWING) &&
-        atspi_state_set_contains(states.get(), ATSPI_STATE_SENSITIVE);
-}
-
 bool actionable(AtspiRole role) {
     switch (role) {
     case ATSPI_ROLE_PUSH_BUTTON: case ATSPI_ROLE_TOGGLE_BUTTON:
@@ -162,6 +167,9 @@ bool actionable(AtspiRole role) {
     case ATSPI_ROLE_ICON: case ATSPI_ROLE_TABLE_CELL:
     case ATSPI_ROLE_COMBO_BOX: case ATSPI_ROLE_PAGE_TAB:
     case ATSPI_ROLE_LIST_ITEM: case ATSPI_ROLE_ENTRY:
+    case ATSPI_ROLE_CHECK_MENU_ITEM: case ATSPI_ROLE_RADIO_MENU_ITEM:
+    case ATSPI_ROLE_TREE_ITEM: case ATSPI_ROLE_PASSWORD_TEXT:
+    case ATSPI_ROLE_SPIN_BUTTON:
         return true;
     default: return false;
     }
@@ -172,7 +180,7 @@ struct WalkContext {
     int windowIndex;
     QRectF topExtents;
     int remainingNodes = MaximumNodes;
-    QSet<QString> seen = {};
+    QSet<QPoint> seen = {};
 };
 
 bool onScreen(const QPointF &point, const Scene &scene) {
@@ -189,37 +197,43 @@ bool unobscured(const QPointF &point, const WalkContext &context) {
     return true;
 }
 
-void walk(AtspiAccessible *node, WalkContext &context, ScanRun &run, int depth) {
-    if (depth > MaximumDepth) {
-        run.result.metrics.depthLimitReached = true;
-        return;
-    }
-    if (context.remainingNodes <= 0) {
-        run.result.metrics.nodeLimitReached = true;
-        return;
-    }
-    --context.remainingNodes;
-    ++run.result.metrics.visitedNodes;
-    if (!visible(node)) return;
+void collectTarget(AtspiAccessible *node, WalkContext &context, ScanRun &run) {
     GError *error = nullptr;
     const AtspiRole role = atspi_accessible_get_role(node, &error);
     if (error) { g_error_free(error); return; }
-    if (actionable(role)) {
-        const QRectF bounds = atspiRectangle(node);
-        const Window &window = context.scene.windows[context.windowIndex];
-        if (bounds.width() >= 5 && bounds.height() >= 5) {
-            const QPointF point = window.client.topLeft() + bounds.center() - context.topExtents.topLeft();
-            if (window.client.contains(point) && onScreen(point, context.scene) && unobscured(point, context)) {
-                const QString key = QStringLiteral("%1:%2:%3").arg(qRound(point.x())).arg(qRound(point.y())).arg(role);
-                if (!context.seen.contains(key)) {
-                    context.seen.insert(key);
-                    run.result.targets.push_back({point, window.id, {}, window.client});
-                }
-            }
-        }
-    }
+    if (!actionable(role)) return;
+
+    const QRectF bounds = atspiRectangle(node);
+    if (bounds.width() < 5 || bounds.height() < 5) return;
+    const Window &window = context.scene.windows[context.windowIndex];
+    const QPointF point = window.client.topLeft() + bounds.center() - context.topExtents.topLeft();
+    if (!window.client.contains(point) || !onScreen(point, context.scene) || !unobscured(point, context))
+        return;
+    const QPoint key = point.toPoint();
+    if (context.seen.contains(key)) return;
+    context.seen.insert(key);
+    run.result.targets.push_back({point, window.id, {}, window.client});
+}
+
+void walk(AtspiAccessible *node, WalkContext &context, ScanRun &run, int depth) {
+    --context.remainingNodes;
+    ++run.result.metrics.visitedNodes;
+    const GObjectPtr<AtspiStateSet> states(atspi_accessible_get_state_set(node));
+    if (!states || !atspi_state_set_contains(states.get(), ATSPI_STATE_VISIBLE) ||
+        !atspi_state_set_contains(states.get(), ATSPI_STATE_SHOWING))
+        return;
+
+    // Containers can expose sensitive children even when they don't handle
+    // input themselves. Sensitivity only controls whether this node is hinted.
+    if (atspi_state_set_contains(states.get(), ATSPI_STATE_SENSITIVE))
+        collectTarget(node, context, run);
+
     const int children = childCount(node);
     if (children > MaximumChildren) run.result.metrics.childLimitReached = true;
+    if (depth == MaximumDepth && children > 0) {
+        run.result.metrics.depthLimitReached = true;
+        return;
+    }
     const int boundedChildren = qMin(children, MaximumChildren);
     for (int i = 0; i < boundedChildren; ++i) {
         if (context.remainingNodes <= 0) {
@@ -235,7 +249,7 @@ void visitSurface(AtspiAccessible *top, const Scene &scene, int windowIndex,
                   const QRectF &topExtents, Pass pass, ScanRun &run) {
     QElapsedTimer timer;
     timer.start();
-    const bool activated = activateAccessibleTree(top);
+    const bool activated = activateAccessibleTree(top, pass);
     run.activationNs += timer.nsecsElapsed();
 
     timer.restart();
@@ -249,71 +263,101 @@ void visitSurface(AtspiAccessible *top, const Scene &scene, int windowIndex,
     run.traversalNs += timer.nsecsElapsed();
 }
 
+bool fullyCovered(const Scene &scene, int windowIndex) {
+    const QRectF &client = scene.windows[windowIndex].client;
+    for (int i = windowIndex + 1; i < scene.windows.size(); ++i) {
+        const auto &above = scene.windows[i];
+        if (above.occluding && above.frame.contains(client)) return true;
+    }
+    return false;
+}
+
 void visitApplication(AtspiAccessible *app, const Scene &scene, const QVector<int> &pidMatches,
                       Pass pass, ScanRun &run) {
-    const int topCount = childCount(app);
-    const int boundedTopCount = qMin(topCount, MaximumTopLevels);
-    QVector<QRectF> topFootprints;
-    int footprintSource = -1;
-    auto ensureTopFootprints = [&](int topIndex, AtspiAccessible *top) {
-        if (!topFootprints.isEmpty()) return;
-        footprintSource = topIndex;
-        topFootprints.reserve(boundedTopCount);
-        for (int sibling = 0; sibling < boundedTopCount; ++sibling) {
-            const auto other = sibling != topIndex ? childAt(app, sibling) : nullptr;
-            AtspiAccessible *surface = sibling == topIndex ? top : other.get();
-            topFootprints.push_back(surface ? atspiRectangle(surface) : QRectF());
-        }
+    struct TopLevel {
+        GObjectPtr<AtspiAccessible> accessible;
+        int titleMatches = 0;
+        int titleCandidate = -1;
     };
+    const int topCount = childCount(app);
+    if (topCount <= 0) return;
+    const int boundedTopCount = qMin(topCount, MaximumTopLevels);
+    const bool singleSurface = pidMatches.size() == 1 && topCount == 1;
+    std::vector<TopLevel> tops(boundedTopCount);
+    QVector<QRectF> topFootprints;
+    topFootprints.reserve(boundedTopCount);
+    QHash<int, int> titleClaims;
     for (int t = 0; t < boundedTopCount; ++t) {
-        const auto top = childAt(app, t);
-        if (!top) continue;
-        const QString title = accessibleName(top.get());
-        QVector<int> titleMatches;
+        auto &top = tops[t];
+        top.accessible = childAt(app, t);
+        topFootprints.push_back(top.accessible ? atspiRectangle(top.accessible.get()) : QRectF());
+        if (!top.accessible || singleSurface) continue;
+        const QString title = accessibleName(top.accessible.get());
+        if (title.isEmpty()) continue;
         for (int index : pidMatches) {
             const QString &caption = scene.windows[index].title;
-            if (!title.isEmpty() && (caption == title || caption.startsWith(title + QStringLiteral(" —")) ||
-                title.startsWith(caption + QStringLiteral(" —"))))
-                titleMatches.push_back(index);
-        }
-
-        int match = -1;
-        if (titleMatches.size() == 1) {
-            ensureTopFootprints(t, top.get());
-            const int candidate = titleMatches.first();
-            if (WindowMatcher::uniqueTopMatch(t, topFootprints[t], scene.windows[candidate].client, topFootprints))
-                match = candidate;
-        } else if (pidMatches.size() == 1 && topCount == 1) {
-            match = pidMatches.first();
-        } else {
-            ensureTopFootprints(t, top.get());
-            QVector<WindowMatcher::Candidate> geometryCandidates;
-            for (int index : pidMatches) {
-                const Window &window = scene.windows[index];
-                if (!window.special) geometryCandidates.push_back({index, window.client});
+            if (caption == title || caption.startsWith(title + QStringLiteral(" —")) ||
+                title.startsWith(caption + QStringLiteral(" —"))) {
+                ++top.titleMatches;
+                top.titleCandidate = index;
             }
-            match = WindowMatcher::uniqueGeometryMatch(t, topFootprints[t], geometryCandidates, topFootprints);
         }
-        // Panels and popups can share a process with many surfaces.
-        // An ambiguous title must never become a clickable hint.
-        if (match >= 0) {
-            ++run.result.matchedWindows;
-            const Window &window = scene.windows[match];
-            if ((window.special || window.popup) && titleMatches.size() != 1 && pidMatches.size() != 1)
-                match = -1;
+        if (top.titleMatches == 1 &&
+            WindowMatcher::dimensionsMatch(topFootprints[t], scene.windows[top.titleCandidate].client))
+            ++titleClaims[top.titleCandidate];
+        else
+            top.titleCandidate = -1;
+    }
+
+    QVector<WindowMatcher::Candidate> geometryCandidates;
+    for (int index : pidMatches) {
+        const Window &window = scene.windows[index];
+        if (!window.special && (!window.popup || pidMatches.size() == 1) && !titleClaims.contains(index))
+            geometryCandidates.push_back({index, window.client});
+    }
+
+    bool activatedSurface = false;
+    for (int t = 0; t < boundedTopCount; ++t) {
+        const auto &top = tops[t];
+        if (!top.accessible) continue;
+        int match = -1;
+        if (singleSurface) {
+            match = pidMatches.first();
+        } else if (top.titleMatches == 1) {
+            const int candidate = top.titleCandidate;
+            if (titleClaims.value(candidate) == 1) {
+                match = candidate;
+                // A same-size sibling is distinguishable only when it has
+                // its own one-to-one title and geometry match.
+                for (int sibling = 0; sibling < boundedTopCount; ++sibling) {
+                    if (sibling != t &&
+                        WindowMatcher::dimensionsMatch(topFootprints[sibling], scene.windows[candidate].client) &&
+                        titleClaims.value(tops[sibling].titleCandidate) != 1) {
+                        match = -1;
+                        break;
+                    }
+                }
+            }
+        } else {
+            match = WindowMatcher::uniqueGeometryMatch(t, topFootprints[t], geometryCandidates, topFootprints);
         }
         if (match < 0) {
             ++run.result.unmatchedWindows;
             continue;
         }
 
-        // Earlier sibling footprints serve matching. Recheck geometry on the
-        // actual root before activating it or deriving target coordinates.
-        const QRectF topExtents = pass == Pass::Probe && footprintSource == t
-            ? topFootprints[t]
-            : atspiRectangle(top.get());
-        if (WindowMatcher::dimensionsMatch(topExtents, scene.windows[match].client))
-            visitSurface(top.get(), scene, match, topExtents, pass, run);
+        const QRectF topExtents = activatedSurface ? atspiRectangle(top.accessible.get()) : topFootprints[t];
+        if (!WindowMatcher::dimensionsMatch(topExtents, scene.windows[match].client)) {
+            ++run.result.unmatchedWindows;
+            continue;
+        }
+        ++run.result.matchedWindows;
+        if (fullyCovered(scene, match)) {
+            ++run.coveredWindows;
+            continue;
+        }
+        visitSurface(top.accessible.get(), scene, match, topExtents, pass, run);
+        activatedSurface = true;
     }
 }
 
@@ -374,7 +418,7 @@ TargetScanner::ProbeResult TargetScanner::probe(const QJsonObject &snapshot) con
     ProbeStatus status = ProbeStatus::NeedsHydration;
     if (!result.error.isEmpty()) status = ProbeStatus::Failed;
     else if (result.metrics.probedWindows > 0 && !run.needsHydration &&
-             result.metrics.probedWindows == result.matchedWindows && result.unmatchedWindows == 0)
+             result.metrics.probedWindows + run.coveredWindows == result.matchedWindows && result.unmatchedWindows == 0)
         status = ProbeStatus::Ready;
     return {status, result.error, result.unmatchedWindows, result.matchedWindows, result.metrics};
 }

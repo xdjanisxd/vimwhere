@@ -6,6 +6,7 @@
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDBusServiceWatcher>
 #include <QDBusVariant>
 #include <QGuiApplication>
 #include <QDebug>
@@ -104,7 +105,15 @@ bool streamsFromVariant(const QVariant &raw, QVector<Stream> &streams) {
 }
 } // namespace
 
-PortalClicker::PortalClicker(QObject *parent) : QObject(parent) {}
+PortalClicker::PortalClicker(QObject *parent) : QObject(parent) {
+    auto *watcher = new QDBusServiceWatcher(QString::fromLatin1(service),
+        QDBusConnection::sessionBus(), QDBusServiceWatcher::WatchForOwnerChange, this);
+    connect(watcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
+        [this](const QString &, const QString &oldOwner, const QString &) {
+            if (!oldOwner.isEmpty() && step_ != Step::Idle)
+                fail(QStringLiteral("Portal service disconnected"));
+        });
+}
 
 PortalClicker::~PortalClicker() { closeSession(); }
 
@@ -403,6 +412,7 @@ void PortalClicker::closeSession() {
             this, SLOT(onRequestResponse(uint,QVariantMap)));
         auto close = QDBusMessage::createMethodCall(QString::fromLatin1(service), requestPath_,
             QString::fromLatin1(requestInterface), QStringLiteral("Close"));
+        close.setAutoStartService(false);
         QDBusConnection::sessionBus().asyncCall(close);
         requestPath_.clear();
     }
@@ -412,6 +422,7 @@ void PortalClicker::closeSession() {
         QString::fromLatin1(sessionInterface), QStringLiteral("Closed"), this, SLOT(onSessionClosed()));
     auto message = QDBusMessage::createMethodCall(QString::fromLatin1(service), sessionPath_,
         QString::fromLatin1(sessionInterface), QStringLiteral("Close"));
+    message.setAutoStartService(false);
     QDBusConnection::sessionBus().asyncCall(message);
     sessionPath_.clear();
 }

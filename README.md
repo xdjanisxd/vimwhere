@@ -29,7 +29,7 @@ To restart the Plasma Wayland autostart after each successful development build,
 
 ## Use
 
-Run `./build/vimwhere` from the repository root in a native KDE Wayland session. The shortcuts default to `Ctrl+Alt+F` for hints and `Ctrl+Alt+G` for the grid. On first use, the selected shortcut starts the portal permission flow and does not select a target; grant access, then press the shortcut again. Hint mode runs five shallow AT-SPI probes in a background process at 80 ms intervals to give accessibility trees about 400 ms to hydrate. One final scan supplies all the hint targets. If access is denied, the app shows an error overlay. Both shortcuts can be configured through the QSettings keys `shortcuts/hints` and `shortcuts/grid` (defaults: `Ctrl+Alt+F` and `Ctrl+Alt+G`).
+Run `./build/vimwhere` from the repository root in a native KDE Wayland session. The shortcuts default to `Ctrl+Alt+F` for hints and `Ctrl+Alt+G` for the grid. On first use, the selected shortcut starts the portal permission flow and does not select a target; grant access, then press the shortcut again. On the first invocation, hint mode gives accessibility trees about 400 ms to populate. Invoking hints again within ten seconds on the same window layout starts a fresh scan immediately. If a previously covered window returns fewer targets, Vimwhere repeats the preparation and scans again. If access is denied, the app shows an error overlay. Both shortcuts can be configured through the QSettings keys `shortcuts/hints` and `shortcuts/grid` (defaults: `Ctrl+Alt+F` and `Ctrl+Alt+G`).
 
 Run `./build/vimwhere --diagnose` to print the Qt platform, screen geometry and scale, session D-Bus state, KWin and portal service availability, AT-SPI initialization and desktop count, plus a reminder about portal consent. Its success exit code checks for a Wayland Qt platform, connected session D-Bus, and successful AT-SPI initialization; an already-initialized AT-SPI client is also considered available. It does not verify that KWin scripting or portal pointer control is usable.
 
@@ -44,6 +44,6 @@ The current implementation has limits: hint scanning only includes actionable AT
 - `QT_QPA_PLATFORM=offscreen ./build/vimwhere --help`: passed.
 - `--diagnose` under Qt's offscreen platform: exited 1; session D-Bus access was not permitted and AT-SPI was unavailable in this sandbox.
 
-CMake is not available in the current environment. These build and smoke checks do not establish live KWin bridge, portal permission, or pointer injection behavior; end-to-end behavior on a KDE Wayland desktop remains unverified.
+The CMake build and automated tests also pass. End-to-end behavior on a KDE Wayland desktop still needs manual verification.
 
 Use [the manual test checklist](docs/manual-testing.md) to record acceptance results on a running KDE Wayland desktop. Do not mark a check complete until it has been performed against the built application.

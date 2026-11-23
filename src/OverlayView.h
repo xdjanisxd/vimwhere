@@ -9,7 +9,7 @@ class OverlayView : public QQuickView {
     Q_OBJECT
 public:
     explicit OverlayView(QScreen *screen);
-    void setPresentation(const QString &mode, const QString &prompt,
+    void setPresentation(const QString &prompt,
                          const QVariantList &hints, const QVariantList &grid);
     void setKeyboardOwner(bool owner);
 signals:

@@ -62,10 +62,18 @@ AppController::AppController(QObject *parent)
     connect(qApp, &QGuiApplication::screenAdded, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
         else cancelHintScan();
+        QTimer::singleShot(0, this, [this] {
+            ensureOverlays();
+            if (m_mode != Mode::Idle) render();
+        });
     });
     connect(qApp, &QGuiApplication::screenRemoved, this, [this] {
         if (m_mode != Mode::Idle) { closeMode(); showError(QStringLiteral("Display layout changed; invoke the command again")); }
         else cancelHintScan();
+        QTimer::singleShot(0, this, [this] {
+            ensureOverlays();
+            if (m_mode != Mode::Idle) render();
+        });
     });
     connect(&m_kwin, &KWinBridge::snapshotChanged, this, [this] {
         if (m_hintLayout && !isHintScanCurrent()) cancelHintScan();
@@ -81,6 +89,7 @@ bool AppController::start() {
         qCritical().noquote() << m_kwin.errorString();
         return false;
     }
+    ensureOverlays();
     m_hintScanWorker.warmUp([timer = startedTimer()](const QString &error) {
         qCDebug(hintPerformance).nospace() << "phase=accessibility-startup elapsed_ms="
             << timer.elapsed() << " ok=" << error.isEmpty();
@@ -129,6 +138,9 @@ void AppController::ensureOverlays() {
     for (QScreen *screen : screens) {
         auto *view = new OverlayView(screen);
         connect(view, &OverlayView::keyInput, this, &AppController::handleKey);
+        view->setPresentation(QString(), {}, {});
+        view->setKeyboardOwner(false);
+        view->show();
         m_overlays.push_back(view);
     }
 }
@@ -148,6 +160,7 @@ void AppController::openHints() {
     m_hintOpenedAt = openedAt;
     const quint64 invocation = ++m_hintInvocation;
     m_hintProbeNumber = 0;
+    m_hintScanNumber = 0;
     m_hintLayout = hintLayout(m_kwin.snapshot());
     m_hintScanWorker.prepare([this, invocation, timer = startedTimer()](const QString &error) {
         if (!isHintScanCurrent()) { cancelHintScan(); return; }
@@ -172,8 +185,8 @@ void AppController::startHintScan() {
         },
         [this, invocation](HintScanRetry::Done done) {
             m_hintScanWorker.scan(m_kwin.snapshot(),
-                [invocation, timer = startedTimer(), done = std::move(done)](TargetScanner::Result result) {
-                    logHintScan(invocation, "final-scan", 1, timer, result.metrics, result.matchedWindows,
+                [invocation, attempt = ++m_hintScanNumber, timer = startedTimer(), done = std::move(done)](TargetScanner::Result result) {
+                    logHintScan(invocation, "final-scan", attempt, timer, result.metrics, result.matchedWindows,
                         result.unmatchedWindows, result.targets.size(), result.error.isEmpty() ? "ok" : "failed");
                     done(std::move(result));
                 });
@@ -189,7 +202,7 @@ void AppController::startHintScan() {
             m_mode = Mode::Hints;
             render(hintPerformance().isDebugEnabled());
         },
-        [this] { return isHintScanCurrent(); });
+        [this] { return isHintScanCurrent(); }, *m_hintLayout);
 }
 
 bool AppController::isHintScanCurrent() const {
@@ -231,7 +244,10 @@ void AppController::showError(const QString &error) {
 
 void AppController::closeMode() {
     cancelHintScan();
-    for (OverlayView *view : m_overlays) view->hide();
+    for (OverlayView *view : m_overlays) {
+        view->setKeyboardOwner(false);
+        view->setPresentation(QString(), {}, {});
+    }
     m_mode = Mode::Idle;
     m_hints.clear();
     m_gridHistory.clear();
@@ -277,11 +293,8 @@ void AppController::render(bool measureHintPresentation) {
     ensureOverlays();
     if (m_overlays.isEmpty()) { qWarning() << "No overlay screen"; return; }
     QString prompt;
-    if (m_mode == Mode::Hints) prompt = QStringLiteral("Hints: %1   Esc cancel   Backspace undo").arg(m_prefix);
-    else if (m_mode == Mode::Grid) prompt = m_gridScreenSelect
-        ? QStringLiteral("Grid: choose display 1–%1   Esc cancel").arg(m_screenLayout.size())
-        : QStringLiteral("Grid: 1–9 narrow   Enter click   Backspace undo   Esc cancel %1").arg(m_gridMessage);
-    else prompt = QStringLiteral("Vimwhere error: %1   Esc close").arg(m_error);
+    if (m_mode == Mode::Error) prompt = QStringLiteral("Vimwhere: %1").arg(m_error);
+    else if (m_mode == Mode::Grid) prompt = m_gridMessage;
     int focusIndex = 0;
     const QString active = m_kwin.snapshot().value(QStringLiteral("activeScreen")).toString();
     for (int i = 0; i < m_overlays.size(); ++i)
@@ -336,8 +349,7 @@ void AppController::render(bool measureHintPresentation) {
             }
         }
         view->setKeyboardOwner(i == focusIndex);
-        view->setPresentation(m_mode == Mode::Hints ? QStringLiteral("hints") :
-            m_mode == Mode::Grid ? QStringLiteral("grid") : QStringLiteral("error"), prompt, hints, grid);
+        view->setPresentation(prompt, hints, grid);
         view->show();
     }
     m_overlays[focusIndex]->requestActivate();
@@ -385,7 +397,7 @@ void AppController::handleKey(int key, const QString &text) {
         if (text.size() != 1 || text[0] < QLatin1Char('1') || text[0] > QLatin1Char('9')) return;
         const QRectF next = NavigationMath::gridCell(m_gridBounds, text[0].digitValue());
         if (NavigationMath::visibleParts(next, m_screenLayout).isEmpty()) {
-            m_gridMessage = QStringLiteral("— empty cell; choose another"); render(); return;
+            m_gridMessage = QStringLiteral("Empty cell; choose another"); render(); return;
         }
         m_gridHistory.push_back(m_gridBounds);
         m_gridBounds = next;
@@ -411,7 +423,7 @@ void AppController::selectGrid() {
     const QVector<QRectF> visibleParts = NavigationMath::visibleParts(m_gridBounds, m_screenLayout);
     if (visibleParts.isEmpty()) { showError(QStringLiteral("Selected grid cell is outside all displays")); return; }
     if (visibleParts.size() > 1) {
-        m_gridMessage = QStringLiteral("— narrow to one display before Enter");
+        m_gridMessage = QStringLiteral("Narrow to one display before Enter");
         render();
         return;
     }

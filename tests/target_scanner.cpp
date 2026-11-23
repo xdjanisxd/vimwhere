@@ -21,13 +21,24 @@ bool delayedProvider = false;
 bool zeroChildDelay = false;
 bool partialTreeDelay = false;
 bool busyRoot = false;
+bool rootSensitive = true;
+bool rootShowing = true;
+bool targetSensitive = true;
+bool rootRoleFailure = false;
+bool deepTree = false;
+AtspiRole firstRole = ATSPI_ROLE_PUSH_BUTTON;
+AtspiRole secondRole = ATSPI_ROLE_PUSH_BUTTON;
 int activations = 0;
 int attributeRequests = 0;
 int cacheClears = 0;
+int subtreeCacheClears = 0;
 int appTopListReads = 0;
 int targetNameReads = 0;
 int targetBoundsReads = 0;
+int topBoundsReads = 0;
+int rootChildReads = 0;
 int firstButtonX = 20;
+int secondButtonX = 220;
 int indexOf(const void *object) {
     for (int i = 0; i < int(objects.size()); ++i)
         if (objects[i] == object) return i;
@@ -54,13 +65,24 @@ void reset(bool enabled = false) {
     zeroChildDelay = false;
     partialTreeDelay = false;
     busyRoot = false;
+    rootSensitive = true;
+    rootShowing = true;
+    targetSensitive = true;
+    rootRoleFailure = false;
+    deepTree = false;
+    firstRole = ATSPI_ROLE_PUSH_BUTTON;
+    secondRole = ATSPI_ROLE_PUSH_BUTTON;
     activations = 0;
     attributeRequests = 0;
     cacheClears = 0;
+    subtreeCacheClears = 0;
     appTopListReads = 0;
     targetNameReads = 0;
     targetBoundsReads = 0;
+    topBoundsReads = 0;
+    rootChildReads = 0;
     firstButtonX = 20;
+    secondButtonX = 220;
 }
 QJsonObject multiWindowSnapshot() {
     return {{"windows", QJsonArray{
@@ -97,6 +119,8 @@ AtspiAccessible *atspi_accessible_get_child_at_index(AtspiAccessible *obj, gint 
         if (child == 1 && multiWindow) return ref<AtspiAccessible>(4);
         return nullptr;
     }
+    if (i == 2) ++rootChildReads;
+    if (i == 2 && deepTree && child == 0) return ref<AtspiAccessible>(2);
     if ((i == 2 || i == 4) && child == 0 && !(i == 2 && (!active || cachedNullChild)))
         return ref<AtspiAccessible>(i + 1);
     if (i == 2 && child == 1 && partialTreeDelay && attributeRequests >= 3)
@@ -112,9 +136,15 @@ gchar *atspi_accessible_get_name(AtspiAccessible *obj, GError **) {
     }
     return g_strdup(i == 4 && !sameTitleTop ? "Popup" : "Fixture");
 }
-AtspiRole atspi_accessible_get_role(AtspiAccessible *obj, GError **) {
+AtspiRole atspi_accessible_get_role(AtspiAccessible *obj, GError **error) {
     const int i = indexOf(obj);
-    return i == 3 || i == 5 || i == 6 ? ATSPI_ROLE_PUSH_BUTTON : ATSPI_ROLE_FRAME;
+    if (i == 2 && rootRoleFailure) {
+        g_set_error_literal(error, g_quark_from_static_string("fixture"), 1, "Role unavailable");
+        return ATSPI_ROLE_INVALID;
+    }
+    if (i == 3 || i == 5) return firstRole;
+    if (i == 6) return secondRole;
+    return ATSPI_ROLE_FRAME;
 }
 AtspiComponent *atspi_accessible_get_component(AtspiAccessible *obj) { return ref<AtspiComponent>(indexOf(obj)); }
 AtspiRect *atspi_component_get_extents(AtspiComponent *obj, AtspiCoordType type, GError **) {
@@ -123,25 +153,37 @@ AtspiRect *atspi_component_get_extents(AtspiComponent *obj, AtspiCoordType type,
     const int i = indexOf(obj);
     if (i == 3 || i == 5 || i == 6) {
         ++targetBoundsReads;
-        *rect = AtspiRect{i == 6 ? 220 : firstButtonX, 30, 80, 40};
+        *rect = AtspiRect{i == 6 ? secondButtonX : firstButtonX, 30, 80, 40};
     } else {
+        ++topBoundsReads;
         *rect = i == 4 && !sameSizeTop ? AtspiRect{0, 0, 470, 55} : AtspiRect{0, 0, 400, 300};
     }
     return rect;
 }
 AtspiStateSet *atspi_accessible_get_state_set(AtspiAccessible *obj) { return ref<AtspiStateSet>(indexOf(obj)); }
 gboolean atspi_state_set_contains(AtspiStateSet *states, AtspiStateType type) {
-    return type == ATSPI_STATE_VISIBLE || type == ATSPI_STATE_SHOWING || type == ATSPI_STATE_SENSITIVE ||
+    if (type == ATSPI_STATE_SENSITIVE)
+        return indexOf(states) == 2 ? rootSensitive : targetSensitive;
+    if (type == ATSPI_STATE_SHOWING)
+        return indexOf(states) != 2 || rootShowing;
+    return type == ATSPI_STATE_VISIBLE ||
         (type == ATSPI_STATE_BUSY && busyRoot && indexOf(states) == 2);
 }
-void atspi_accessible_clear_cache(AtspiAccessible *obj) {
+void atspi_accessible_clear_cache_single(AtspiAccessible *obj) {
     if (indexOf(obj) != 2) return;
     ++cacheClears;
     cachedAttributes = false;
     if (active && (!delayedProvider || attributeRequests >= 2)) cachedNullChild = false;
 }
+void atspi_accessible_clear_cache(AtspiAccessible *obj) {
+    ++subtreeCacheClears;
+    atspi_accessible_clear_cache_single(obj);
+}
 GHashTable *atspi_accessible_get_attributes(AtspiAccessible *obj, GError **error) {
-    check(indexOf(obj) == 2, "Activate only the matched window");
+    const int i = indexOf(obj);
+    if (i == 4 && multiWindow && sameSizeTop)
+        return g_hash_table_new(g_str_hash, g_str_equal);
+    check(i == 2, "Activate only the matched window");
     ++attributeRequests;
     if (attributeFailure) {
         g_set_error_literal(error, g_quark_from_static_string("fixture"), 1, "Unsupported attributes");
@@ -169,6 +211,39 @@ int main(int argc, char **argv) {
     check(activations == 1, "Cached attributes must be refreshed to activate the provider");
     check(result.metrics.visitedNodes == 2 && targetNameReads == 0,
           "Read actionable geometry without requesting unused target names");
+    check(topBoundsReads == 1, "Use the current root geometry for both matching and target placement");
+    reset();
+    rootSensitive = false;
+    firstRole = ATSPI_ROLE_TREE_ITEM;
+    check(scanner.scan(snapshot()).targets.size() == 1,
+          "Find sensitive tree items beneath visible containers that do not handle input");
+    reset();
+    rootRoleFailure = true;
+    check(scanner.scan(snapshot()).targets.size() == 1,
+          "An ancestor's unavailable role must not discard visible descendants");
+    reset();
+    rootShowing = false;
+    check(scanner.scan(snapshot()).targets.isEmpty() && rootChildReads == 0,
+          "Prune subtrees beneath a root that is not showing");
+    reset();
+    targetSensitive = false;
+    check(scanner.scan(snapshot()).targets.isEmpty(), "Skip controls that cannot receive input");
+    reset();
+    firstRole = ATSPI_ROLE_CHECK_MENU_ITEM;
+    check(scanner.scan(snapshot()).targets.size() == 1, "Include checkable menu items");
+    reset();
+    partialTreeDelay = true;
+    secondButtonX = firstButtonX;
+    secondRole = ATSPI_ROLE_LINK;
+    scanner.probe(snapshot());
+    scanner.probe(snapshot());
+    check(scanner.scan(snapshot()).targets.size() == 1,
+          "Two accessibles at the same click point share a single hint");
+    reset();
+    deepTree = true;
+    const auto truncated = scanner.scan(snapshot());
+    check(truncated.metrics.depthLimitReached && rootChildReads + 1 == truncated.metrics.visitedNodes,
+          "Report the depth limit without requesting children beyond it");
     reset();
     QJsonObject noProvider = snapshot();
     QJsonArray noProviderWindows = noProvider.value(QStringLiteral("windows")).toArray();
@@ -226,6 +301,22 @@ int main(int argc, char **argv) {
     check(sameTitleResult.targets.isEmpty() && sameTitleResult.matchedWindows == 0,
           "Two same-title, same-size AT-SPI roots remain ambiguous against one KWin window");
     reset();
+    multiWindow = true;
+    sameSizeTop = true;
+    auto distinctTitles = snapshot();
+    auto distinctWindows = distinctTitles.value(QStringLiteral("windows")).toArray();
+    distinctWindows.append(QJsonObject{{"id", "other"}, {"pid", 42}, {"title", "Popup"},
+        {"client", QJsonArray{600, 100, 400, 300}}, {"frame", QJsonArray{600, 100, 400, 300}}});
+    distinctTitles.insert(QStringLiteral("windows"), distinctWindows);
+    const auto distinctResult = scanner.scan(distinctTitles);
+    check(distinctResult.matchedWindows == 2 && distinctResult.targets.size() == 2 &&
+              distinctResult.targets[0].windowId == QStringLiteral("fixture") &&
+              distinctResult.targets[1].windowId == QStringLiteral("other"),
+          "Distinct one-to-one titles disambiguate same-PID roots of the same size");
+    const auto incompleteTitles = scanner.scan(snapshot());
+    check(incompleteTitles.targets.isEmpty() && incompleteTitles.matchedWindows == 0,
+          "A sibling with no corresponding window keeps a same-size root ambiguous");
+    reset();
     delayedProvider = true;
     check(scanner.scan(snapshot()).targets.isEmpty(), "A late provider must be allowed to remain incomplete initially");
     auto lateResult = scanner.scan(snapshot());
@@ -247,7 +338,12 @@ int main(int argc, char **argv) {
     check(scanner.probe(snapshot()).status == ProbeStatus::Ready && targetBoundsReads == 0,
           "A second probe can see the late root child without reading target geometry");
     check(scanner.scan(snapshot()).targets.size() == 1 && targetBoundsReads == 1,
-          "The final full scan alone collects target geometry after probes");
+          "The full scan collects target geometry after probes");
+#if ATSPI_MAJOR_VERSION > 2 || (ATSPI_MAJOR_VERSION == 2 && ATSPI_MINOR_VERSION >= 52)
+    check(subtreeCacheClears == 1, "Only the full scan refreshes descendant caches");
+#else
+    check(subtreeCacheClears == cacheClears, "Older libatspi requires refreshing the whole tree");
+#endif
     reset();
     delayedProvider = true;
     check(scanner.probe(snapshot()).status == ProbeStatus::NeedsHydration,
@@ -286,7 +382,14 @@ int main(int argc, char **argv) {
     check(scanner.probe(snapshot(false, true)).metrics.probedWindows == 0 && activations == 0,
           "Reject unsafe geometry before probing or activating the provider");
     reset();
-    check(scanner.scan(snapshot(true)).targets.isEmpty(), "Covered targets must remain rejected");
+    const auto coveredResult = scanner.scan(snapshot(true));
+    check(coveredResult.targets.isEmpty() && coveredResult.metrics.visitedNodes == 0 && attributeRequests == 0,
+          "Skip the provider tree when its entire client is covered");
+    QJsonObject partial = snapshot(true);
+    QJsonArray stack = partial["windows"].toArray();
+    stack[1] = QJsonObject{{"pid", 99}, {"frame", QJsonArray{400, 100, 100, 300}}};
+    partial["windows"] = stack;
+    check(!scanner.scan(partial).targets.isEmpty(), "Collect visible controls in a partly covered window");
     for (auto *object : objects) {
         check(object->ref_count == 1, "Scanner leaked an accessible/component/state reference");
         g_object_unref(object);
